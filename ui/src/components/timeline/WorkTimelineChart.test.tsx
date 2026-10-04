@@ -205,6 +205,23 @@ describe("WorkTimelineChart", () => {
     expect(portraits?.[1].getAttribute("href")).toContain("/api/agent-avatars/cap-v1/");
   });
 
+  it("falls back to the palette portrait when an uploaded avatar fails to load", () => {
+    const data = timelineSample();
+    data.actors[0].appearance = { ...appearanceForPalette("deep-tide"), image: "/api/assets/missing/content" };
+    renderChart(data);
+
+    const gutter = container.querySelector<SVGSVGElement>("[data-testid='work-timeline-actor-gutter']")!;
+    const uploaded = gutter.querySelector<SVGImageElement>('image[data-testid="timeline-agent-icon"]')!;
+
+    flushSync(() => {
+      uploaded.dispatchEvent(new Event("error", { bubbles: true }));
+    });
+
+    const portrait = gutter.querySelector<SVGImageElement>('image[data-testid="timeline-agent-icon"]')!;
+    expect(portrait.getAttribute("href")).toContain("/api/agent-avatars/cap-v1/");
+    expect(portrait.getAttribute("clip-path")).toBeNull();
+  });
+
   it("does not render created diamonds or comment bubbles from instant events", () => {
     const data = timelineSample();
     data.actors.push({ id: "user:dotta", type: "user", name: "Dotta" });
