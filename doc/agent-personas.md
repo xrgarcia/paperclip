@@ -15,9 +15,13 @@ an agent generates another assignment. Export/import preserves it.
 
 ## Uploaded images
 
-`image` is optional. It uses the same validation as user profile images: a
-company asset path (`/api/assets/<id>/content`) or an http(s) URL. The agent
-header uploads through the company assets route and saves the path on the
+`image` is optional and must be a company asset path
+(`/api/assets/<id>/content`). Remote URLs are rejected, unlike user profile
+images, which may be remote because they come from the OAuth provider: an agent
+can write its own appearance, so a remote URL there would make every viewer of
+an agent surface contact a host the agent picked. A persisted value that is not
+an asset path degrades to the palette character instead of being requested. The
+agent header uploads through the company assets route and saves the path on the
 appearance; "Remove image" saves the appearance without it. When `image` is
 set, `AgentAvatar` shows it circle-cropped and `AgentCharacter` does not start
 the live renderer. The work timeline glyph also uses it, circle-cropped like a
