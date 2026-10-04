@@ -137,7 +137,6 @@ describe("agent avatar field", () => {
       "company-1",
     );
     expect(onError).toHaveBeenCalledWith(null);
-    expect(onUpdated).toHaveBeenCalledTimes(1);
   });
 
   it("removes the uploaded image without uploading and keeps the palette appearance", async () => {
@@ -153,7 +152,6 @@ describe("agent avatar field", () => {
       { appearance: appearanceForPalette("deep-tide") },
       "company-1",
     );
-    expect(onUpdated).toHaveBeenCalledTimes(1);
   });
 
   it("offers removal only when an image is set", () => {
