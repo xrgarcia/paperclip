@@ -14,6 +14,15 @@ describe("agent appearance", () => {
     expect(legacyAgentAppearance("agent-1")).toEqual(legacyAgentAppearance("agent-1"));
     expect(agentAvatarUrl(appearance, 24, 2)).toBe("/api/agent-avatars/cap-v1/deep-tide/rest.png?size=24&scale=2");
   });
+  it("accepts an uploaded asset or http(s) image and rejects other image values", () => {
+    const base = appearanceForPalette("deep-tide");
+    const parse = (image: string) => agentAppearanceSchema.safeParse({ ...base, image }).success;
+    expect(parse("/api/assets/0f9c2c1e-5c1d-4a43-9c5e-1b2a3c4d5e6f/content")).toBe(true);
+    expect(parse("https://example.com/agent.png")).toBe(true);
+    expect(parse("javascript:alert(1)")).toBe(false);
+    expect(parse("/api/agents/1")).toBe(false);
+    expect(resolveAgentAppearance(base, "agent-1")).not.toHaveProperty("image");
+  });
   it("renders without a browser and preserves logical-size detail at high density", () => {
     const appearance = appearanceForPalette("bubblegum-sky");
     // ClipLab v0.2.0 draws an enlarged compact face from 16px; only 12px and

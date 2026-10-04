@@ -1,7 +1,7 @@
 # Agent personas
 
 Agents have a persisted visual identity independent of prompts and runtime
-configuration: `{ schemaVersion: 1, characterVersion: "cap-v1", paletteId }`.
+configuration: `{ schemaVersion: 1, characterVersion: "cap-v1", paletteId, image? }`.
 The cap-v1 library contains 17 permanent palettes and a presentation-only gray
 Muted dream palette. The character itself is one ClipLab studio export —
 `ui/src/assets/cliplab/onboarding.character.json` (end cap, custom idle,
@@ -12,6 +12,17 @@ palette recolours its body. The onboarding hero and every avatar are the same
 character on the same engine (ClipLab v0.2.0, see PROVENANCE.md). New agents get one random assignment; existing rows are
 backfilled with the same ID-based mapping used by legacy clients. Duplicating
 an agent generates another assignment. Export/import preserves it.
+
+## Uploaded images
+
+`image` is optional. It uses the same validation as user profile images: a
+company asset path (`/api/assets/<id>/content`) or an http(s) URL. The agent
+header uploads through the company assets route and saves the path on the
+appearance; "Remove image" saves the appearance without it. When `image` is
+set, `AgentAvatar` shows it circle-cropped and `AgentCharacter` does not start
+the live renderer. If the image fails to load, both fall back to the palette
+character. `Agent.avatarUrl` stays the preset portrait, because company assets
+need authentication and integrations cannot fetch them.
 
 ## Rendering and URLs
 
@@ -55,7 +66,8 @@ front-facing identity portraits minimize the difference from WebGL.
 ## Components
 
 - `AgentAvatar`: image only; pass the agent record or appearance and a semantic
-  size. No per-agent queries, live-renderer imports, or circle cropping.
+  size. No per-agent queries or live-renderer imports. Only uploaded images
+  are circle-cropped; characters are not.
 - `AgentIdentity`: agent avatar and name. Human identities keep `Identity`.
 - `AgentCharacter`: lazy live hero with state and optional tracking-region
   props, plus an explicit `trackingScope="page"` for onboarding and agent headers. One live renderer per view; other instances keep their still image.
