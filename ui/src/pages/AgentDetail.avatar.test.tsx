@@ -1,5 +1,6 @@
 // @vitest-environment jsdom
 
+import { act as reactAct } from "react";
 import { flushSync } from "react-dom";
 import { createRoot, type Root } from "react-dom/client";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
@@ -18,8 +19,7 @@ vi.mock("../components/AgentCharacter", () => ({
   AgentCharacter: ({ label }: { label?: string }) => <span data-testid="agent-character">{label}</span>,
 }));
 
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-(globalThis as any).IS_REACT_ACT_ENVIRONMENT = true;
+(globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
 let container: HTMLDivElement;
 let root: Root;
@@ -32,18 +32,24 @@ beforeEach(() => {
   mockAssetsApi.uploadImage.mockResolvedValue({ contentPath: "/api/assets/asset-1/content" });
 });
 
-afterEach(() => {
-  flushSync(() => root.unmount());
+afterEach(async () => {
+  await act(() => root.unmount());
   container.remove();
   vi.clearAllMocks();
 });
 
 async function act(callback: () => void | Promise<void>) {
+  if (typeof reactAct === "function") {
+    await reactAct(callback);
+    return;
+  }
+
   let result: void | Promise<void> = undefined;
   flushSync(() => {
     result = callback();
   });
   await result;
+  await new Promise((resolve) => setTimeout(resolve, 0));
 }
 
 async function flushReact() {
@@ -97,7 +103,7 @@ function makeAgent(image?: string): Agent {
 
 function renderField(agent: Agent, handlers: { onUpdated: () => void; onError: (message: string | null) => void }) {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
-  flushSync(() => {
+  return act(() => {
     root.render(
       <QueryClientProvider client={client}>
         <AgentAvatarField agent={agent} companyId="company-1" agentRef="agent-1" {...handlers} />
@@ -124,7 +130,7 @@ function buttonByText(text: string) {
 describe("agent avatar field", () => {
   it("uploads a selected file and saves the returned asset path on the appearance", async () => {
     const onUpdated = vi.fn(), onError = vi.fn();
-    renderField(makeAgent(), { onUpdated, onError });
+    await renderField(makeAgent(), { onUpdated, onError });
     const file = new File(["png"], "face.png", { type: "image/png" });
 
     await selectFile(file);
@@ -141,7 +147,7 @@ describe("agent avatar field", () => {
 
   it("removes the uploaded image without uploading and keeps the palette appearance", async () => {
     const onUpdated = vi.fn(), onError = vi.fn();
-    renderField(makeAgent("/api/assets/old-asset/content"), { onUpdated, onError });
+    await renderField(makeAgent("/api/assets/old-asset/content"), { onUpdated, onError });
 
     await act(() => buttonByText("Remove image").click());
 
@@ -154,15 +160,15 @@ describe("agent avatar field", () => {
     );
   });
 
-  it("offers removal only when an image is set", () => {
-    renderField(makeAgent(), { onUpdated: vi.fn(), onError: vi.fn() });
+  it("offers removal only when an image is set", async () => {
+    await renderField(makeAgent(), { onUpdated: vi.fn(), onError: vi.fn() });
     expect(() => buttonByText("Remove image")).toThrow();
   });
 
   it("reports a failed agent update and leaves the controls usable", async () => {
     const onUpdated = vi.fn(), onError = vi.fn();
     mockAgentsApi.update.mockRejectedValue(new Error("Appearance is invalid"));
-    renderField(makeAgent(), { onUpdated, onError });
+    await renderField(makeAgent(), { onUpdated, onError });
 
     await selectFile(new File(["png"], "face.png", { type: "image/png" }));
 
