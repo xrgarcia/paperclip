@@ -3,7 +3,7 @@
 import { flushSync } from "react-dom";
 import type { ComponentProps } from "react";
 import { createRoot, type Root } from "react-dom/client";
-import type { WorkTimelineResult } from "@paperclipai/shared";
+import { appearanceForPalette, type WorkTimelineResult } from "@paperclipai/shared";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { WorkTimelineChart } from "./WorkTimelineChart";
 import { computeLayout } from "@/lib/timeline/layout";
@@ -188,6 +188,21 @@ describe("WorkTimelineChart", () => {
     expect(portraits?.[0].getAttribute("href")).toContain("/api/agent-avatars/cap-v1/");
     expect(portraits?.[1].getAttribute("href")).toContain("/api/agent-avatars/cap-v1/");
     expect(gutter?.textContent).not.toContain("CC");
+  });
+
+  it("renders an uploaded avatar image circle-cropped instead of the palette portrait", () => {
+    const image = "/api/assets/asset-1/content";
+    const data = timelineSample();
+    data.actors[0].appearance = { ...appearanceForPalette("deep-tide"), image };
+    renderChart(data);
+
+    const gutter = container.querySelector<SVGSVGElement>("[data-testid='work-timeline-actor-gutter']");
+
+    const portraits = gutter?.querySelectorAll('image[data-testid="timeline-agent-icon"]');
+    expect(portraits?.length).toBe(2);
+    expect(portraits?.[0].getAttribute("href")).toBe(image);
+    expect(portraits?.[0].getAttribute("clip-path")).toMatch(/^url\(#.+\)$/);
+    expect(portraits?.[1].getAttribute("href")).toContain("/api/agent-avatars/cap-v1/");
   });
 
   it("does not render created diamonds or comment bubbles from instant events", () => {

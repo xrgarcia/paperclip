@@ -20,9 +20,16 @@ company asset path (`/api/assets/<id>/content`) or an http(s) URL. The agent
 header uploads through the company assets route and saves the path on the
 appearance; "Remove image" saves the appearance without it. When `image` is
 set, `AgentAvatar` shows it circle-cropped and `AgentCharacter` does not start
-the live renderer. If the image fails to load, both fall back to the palette
-character. `Agent.avatarUrl` stays the preset portrait, because company assets
-need authentication and integrations cannot fetch them.
+the live renderer. The work timeline glyph also uses it, circle-cropped like a
+user avatar. If the image fails to load, the avatar surfaces fall back to the
+palette character. `Agent.avatarUrl` stays the preset portrait, because company
+assets need authentication and integrations cannot fetch them.
+
+Replacing or removing an image leaves the previous upload in company storage.
+The company assets route is upload-and-read only, so no caller in the app
+deletes an asset; markdown bodies reference the same assets by path. Reclaiming
+unreferenced assets needs a server-side retention pass across every asset
+consumer, not a per-feature delete.
 
 ## Rendering and URLs
 
