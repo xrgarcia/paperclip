@@ -1396,3 +1396,23 @@ local build is not qualification evidence. The completed build left no live
 compiler; its 850,932,819 bytes of disposable target output were removed and
 the staged runner restored to the verified cloud-built binary. Subsequent
 checks invoke TypeScript directly and perform no local Rust or Docker build.
+
+At `1bda794003f98bf6e2879cd474c7f84c3e4145a9`, both cloud targets pass nine
+native fixtures and 38 pinned Python checks. The verified Mac artifact retains
+binary SHA-256 `fef7167af720db91537bbc066e3b8129a15d59bb6425dd95efa2b8a1a00b4980`.
+Fresh Greptile reports 5/5; 53 checks pass with two skips. The broader browser
+shard fails during an unrelated agent-chat cleanup with a database lock timeout,
+then leaves its instance setting enabled for the following test. Its original
+failure remains recorded; PR checks are not fully green.
+
+The native Stop fixture now consumes events through the cancelled terminal
+instead of closing immediately after the interrupt acknowledgement. It requires
+one same-scope cancelled native input, one ordered cancelled terminal, no fallback
+or invented completion, retained final prompt usage, and rejection of a late
+answer after terminal settlement. The strengthened fixture passes locally in
+16.526 seconds against the verified cloud-built Mac daemon, using an empty home
+and a deterministic loopback model, with no credentials or paid calls. Earlier
+fixture attempts remain separate: one checked the late answer prematurely and
+failed during shutdown; another placed the workspace inside its isolated host
+home and was rejected before launch. Neither is live-provider proof. A fresh
+paid browser Stop campaign and the remaining release gates are still required.

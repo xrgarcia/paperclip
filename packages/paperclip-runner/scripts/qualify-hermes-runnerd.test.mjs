@@ -144,6 +144,7 @@ for (const { interactionKind, nativeQuestionAction } of cases) test(nativeQuesti
   await session.startTurn({ message: { role: 'user', text: input.task.prompt, attachments: input.attachments } });
   const events = [];
   let cancellationOutcome;
+  let stoppedQuestionRequest;
   let questionResolutions = 0;
   for await (const event of session.events()) {
     events.push(event);
@@ -165,10 +166,9 @@ for (const { interactionKind, nativeQuestionAction } of cases) test(nativeQuesti
       const resolution = { requestId: request.requestId, turnId: request.turnId,
         resolution: nativeQuestionAction === 'submit' ? { action: 'submit', response: nativeResponse } : { action: 'cancel' } };
       if (nativeQuestionAction === 'stop') {
+        stoppedQuestionRequest = structuredClone(request);
         await session.cancel({ reason: 'stop during native clarification', signal: new AbortController().signal }).cleanup;
-        await session.close({ reason: 'native clarification stopped' });
-        await assert.rejects(session.resolveRuntimeRequest(resolution), /no longer pending/);
-        break;
+        continue;
       }
       await session.resolveRuntimeRequest(resolution);
       await assert.rejects(session.resolveRuntimeRequest(resolution), /no longer pending/);
@@ -185,6 +185,37 @@ for (const { interactionKind, nativeQuestionAction } of cases) test(nativeQuesti
     assert.equal(events.filter(event => event.eventType === 'runtime_request.created').length, 1);
     if (nativeQuestionAction === 'stop') {
       assert.equal(requests.length, 1, 'Stopped clarification started another model request');
+      const outcomes = events.filter(event => ['runtime_request.resolved', 'runtime_request.cancelled', 'runtime_request.expired'].includes(event.eventType));
+      assert.equal(outcomes.length, 1, 'Stopped clarification must close exactly once');
+      const outcome = outcomes[0];
+      assert.equal(outcome.eventType, 'runtime_request.cancelled', 'Stop revived the native input as a durable fallback');
+      assert.equal(outcome.runId, identity.runId);
+      assert.equal(outcome.normalizedSessionId, identity.sessionId);
+      assert.equal(outcome.turnId, stoppedQuestionRequest.turnId);
+      assert.equal(outcome.itemId, stoppedQuestionRequest.itemId);
+      assert.equal(outcome.payload.requestId, stoppedQuestionRequest.requestId);
+      assert.equal(outcome.payload.requestKind, 'runtime');
+      assert.equal(outcome.payload.requestType, 'input');
+      assert.equal(outcome.payload.action, 'cancel');
+      assert.ok(outcome.payload.reason);
+      assert.equal(outcome.payload.response, undefined);
+      assert.equal(outcome.payload.request, undefined);
+      assert.equal(outcome.payload.replayAllowed, undefined);
+      const terminals = events.filter(event => ['turn.completed', 'turn.failed', 'turn.cancelled', 'turn.interrupted'].includes(event.eventType));
+      assert.equal(terminals.length, 1, 'Stopped clarification must retain one native terminal');
+      assert.equal(terminals[0].eventType, 'turn.cancelled');
+      assert.equal(terminals[0].turnId, outcome.turnId);
+      assert.equal(terminals[0].payload.status, 'cancelled');
+      assert.equal(terminals[0].payload.error, null);
+      assert.ok(terminals[0].sourceSeq > outcome.sourceSeq);
+      await assert.rejects(session.resolveRuntimeRequest({ requestId: stoppedQuestionRequest.requestId,
+        turnId: stoppedQuestionRequest.turnId, resolution: { action: 'cancel' } }), /no longer pending/);
+      const usage = await session.accountingUsageEvent?.();
+      assert.deepEqual(usage?.payload.usage.runDelta && {
+        input: usage.payload.usage.runDelta.inputTokens, output: usage.payload.usage.runDelta.outputTokens,
+        complete: usage.payload.usage.runDeltaComplete,
+      }, { input: 10, output: 5, complete: true }, 'Stopped clarification lost final native prompt usage');
+      await session.close({ reason: 'native clarification stopped' });
       assert.equal((await session.snapshot()).semanticResult, null, 'Stop invented task completion');
       return;
     }
