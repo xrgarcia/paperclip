@@ -77,7 +77,7 @@ import type {
   AdapterExecutionResult,
   AdapterRuntimeEvent,
 } from "../../adapters/index.js";
-import { usdToUnits, type NativeFinalizationResult } from "@paperclipai/shared";
+import { usdToUnits, questionSetToAskUserQuestionsPayload, type AskUserQuestionsPayload, type NativeFinalizationResult } from "@paperclipai/shared";
 import type {
   HarnessRuntimeRequestResolution,
   NativeExecutionInput,
@@ -722,24 +722,12 @@ type RuntimeQuestionFallback = {
   continuationPolicy: "wake_assignee";
   payload: {
     version: 1;
-    title?: string;
-    submitLabel?: string;
+    title?: string | null;
+    submitLabel?: string | null;
     supersedeOnUserComment: false;
     runtimeRequestId: string;
     questionSet: PaperclipQuestionSet;
-    questions: Array<{
-      id: string;
-      prompt: string;
-      helpText?: string;
-      selectionMode: "single" | "multi";
-      required: boolean;
-      options: Array<{
-        id: string;
-        label: string;
-        description?: string;
-        freeText?: boolean;
-      }>;
-    }>;
+    questions: AskUserQuestionsPayload["questions"];
   };
 };
 
@@ -775,35 +763,7 @@ export function runtimeQuestionFallbackFromEvent(
   } catch {
     return null;
   }
-  const questions = questionSet.questions.map((question) => ({
-    id: question.id,
-    prompt: question.prompt,
-    ...(question.helpText ? { helpText: question.helpText } : {}),
-    selectionMode:
-      question.answerMode === "multi_select"
-        ? ("multi" as const)
-        : ("single" as const),
-    required: question.required,
-    options:
-      question.answerMode === "text"
-        ? [
-            {
-              id: "__paperclip_text__",
-              label:
-                question.textValidation?.inputType === "integer"
-                  ? "Enter an integer"
-                  : question.textValidation?.inputType === "number"
-                    ? "Enter a number"
-                    : "Enter your answer",
-              freeText: true,
-            },
-          ]
-        : (question.options ?? []).map((option) => ({
-            id: option.id,
-            label: option.label,
-            ...(option.description ? { description: option.description } : {}),
-          })),
-  }));
+  const storagePayload = questionSetToAskUserQuestionsPayload(questionSet);
   return {
     kind: "ask_user_questions",
     idempotencyKey: `runtime-input-durable:v1:${event.runId}:${request.requestId}`,
@@ -812,15 +772,11 @@ export function runtimeQuestionFallbackFromEvent(
     summary: questionSet.description?.slice(0, 1000) ?? null,
     continuationPolicy: "wake_assignee",
     payload: {
-      version: 1,
-      ...(questionSet.title ? { title: questionSet.title.slice(0, 240) } : {}),
-      ...(questionSet.submitLabel
-        ? { submitLabel: questionSet.submitLabel.slice(0, 120) }
-        : {}),
+      ...storagePayload,
       supersedeOnUserComment: false,
       runtimeRequestId: request.requestId,
       questionSet,
-      questions,
+      questions: storagePayload.questions,
     },
   };
 }

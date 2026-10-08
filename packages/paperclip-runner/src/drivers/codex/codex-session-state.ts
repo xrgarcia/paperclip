@@ -302,11 +302,17 @@ export class CodexSessionState {
     }
   }
 
-  cancelPendingRequests(reason: string): void {
+  cancelPendingRequests(reason: string, cancelledTurnId?: string): void {
     for (const pending of this.pendingRuntimeRequestMap.values()) {
+      // Only an authoritative cancelled terminal can retire its input as
+      // cancelled. Other terminal/transport losses keep the durable fallback.
+      const cancelledInput = pending.request.input !== undefined &&
+        pending.request.turnId === cancelledTurnId;
       this.emit(
-        pending.request.input === undefined ? "runtime_request.cancelled" : "runtime_request.expired",
-        pending.request.input === undefined
+        pending.request.input === undefined || cancelledInput ? "runtime_request.cancelled" : "runtime_request.expired",
+        cancelledInput
+          ? { ...harnessRuntimeRequestOutcome(pending.request, { reason, action: "cancel" }), requestKind: "runtime" }
+          : pending.request.input === undefined
           ? harnessRuntimeRequestOutcome(pending.request, { reason })
           : harnessRuntimeInputExpiredOutcome(pending.request, "provider_process_lost"),
         { turnId: pending.request.turnId, itemId: pending.request.itemId },

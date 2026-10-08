@@ -135,10 +135,7 @@ Ordinary remote Cursor startup uses the packaged Linux daemon and verifies every
 image asset against that manifest. A mismatched image fails before the provider
 starts; install the matching package and image together.
 
-Hermes native integration is documented in [Hermes](docs/hermes.md). Its explicit
-public setup command is `paperclipai runtime setup hermes`, with uv 0.12.17 on
-PATH. Setup verifies the pinned Python closure in the execution account's cache;
-Hermes remains pending live qualification.
+Hermes native integration is documented in [Hermes](docs/hermes.md).
 
 Remote Codex sessions relay assigned app tools through the server's configured
 gateway. Small catalogs are sent directly. When a catalog would exceed the

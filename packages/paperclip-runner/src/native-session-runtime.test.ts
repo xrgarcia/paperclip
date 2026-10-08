@@ -1,6 +1,8 @@
 import { createHash } from "node:crypto";
 import { QUALIFIED_ACPX_PROFILES } from "./drivers/acpx/qualified-profiles.js";
 import { describe, expect, it, vi } from "vitest";
+import { FakeCodexTransport, WORKSPACE, makeDriver, collectUntilTerminal } from "./drivers/codex/codex-app-server-driver.test-support.js";
+import { validatePrpEvent } from "./protocol/replay-contract.js";
 
 import type { ControlPlanePort } from "./contracts/control-plane-port.js";
 import type { NativeExecutionInputV1, NativeExecutionInputV5 } from "./contracts/native-execution.js";
@@ -41,6 +43,52 @@ const identity = {
   issueId: "issue-recovery",
   agentId: "agent-recovery",
 };
+
+describe("native question cancellation terminal", () => {
+  it.each(["cancelled", "interrupted", "completed", "failed"] as const)("preserves the %s terminal without reviving a cancelled question", async status => {
+    const transport = new FakeCodexTransport();
+    const session = await makeDriver([transport]).openSession({
+      runId: `native-question-${status}`, normalizedSessionId: `native-question-${status}`, workingDirectory: WORKSPACE,
+    });
+    try {
+      const events = collectUntilTerminal(session.events());
+      const { turnId } = await session.startTurn({ message: { role: "user", text: "Ask before continuing." } });
+      const questionSet = { schema: "paperclip.question_set.v1", questions: [{
+        id: "color", prompt: "Which color?", answerMode: "single_select", required: true,
+        options: [{ id: "cobalt", label: "Cobalt" }, { id: "amber", label: "Amber" }],
+        customAnswer: { enabled: true, label: "Other", placeholder: "Enter a color" },
+      }] };
+      const settled = vi.fn();
+      const response = transport.invoke({ id: "native-question", method: "_hermes/ask_questions",
+        params: { threadId: transport.threadId, turnId, itemId: "native-question-item", questionSet } }).then(settled);
+      await vi.waitFor(() => expect(session.pendingRuntimeRequests?.()).toHaveLength(1));
+      const terminal = { method: "turn/completed", params: { threadId: transport.threadId, turn: { id: turnId, status, error: null } } };
+      transport.queue.push(terminal);
+      const observed = await events;
+      await response;
+      const outcomes = observed.filter(event => ["runtime_request.cancelled", "runtime_request.expired", "runtime_request.resolved"].includes(event.eventType));
+      expect(outcomes).toHaveLength(1);
+      expect(outcomes[0]).toMatchObject({
+        eventType: status === "cancelled" ? "runtime_request.cancelled" : "runtime_request.expired",
+        turnId, itemId: "native-question-item", payload: {
+          requestId: "native-question", requestKind: "runtime", requestType: "input", turnId, itemId: "native-question-item",
+          ...(status === "cancelled" ? { action: "cancel", reason: "turn_terminal" } : { reason: "provider_process_lost", replayAllowed: false, request: { input: questionSet } }),
+        },
+      });
+      expect(validatePrpEvent(outcomes[0]!)).toMatchObject({ ok: true });
+      if (status === "cancelled") {
+        expect(outcomes[0]!.payload).not.toHaveProperty("request");
+        expect(outcomes[0]!.payload).not.toHaveProperty("response");
+        expect(outcomes[0]!.payload).not.toHaveProperty("replayAllowed");
+      }
+      expect(observed.at(-1)).toMatchObject({ eventType: `turn.${status}`, payload: { status, error: null } });
+      expect(session.pendingRuntimeRequests?.()).toHaveLength(0);
+      transport.queue.push(terminal);
+      await session.close({ reason: "fixture complete" });
+      expect(settled).toHaveBeenCalledOnce();
+    } finally { await session.close({ reason: "fixture cleanup" }); }
+  });
+});
 
 const result: PrpStructuredRunResult = {
   schema: "paperclip.run_result.v1",

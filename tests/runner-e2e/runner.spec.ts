@@ -3013,9 +3013,11 @@ for (const execution of executions) {
       }
       if (isHermesConnectionSuite(execution.suite.id)) {
         if (!fixtures?.aiConnection || !issue?.id || !hermesApiAccountOwner?.expectedResponsibleUserId) throw new Error("Hermes connection qualification is missing its selected account, expected user or task");
+        const expectedRunStatus = execution.task.flow === "native_question_stop" ? "cancelled" : "succeeded";
         const checks = gradeHermesApiConnection({ companyId: fixtures.company.id, agentId: fixtures.agent.id,
           issueId: issue.id, connectionId: fixtures.aiConnection.connectionId, provider: fixtures.aiConnection.binding.provider,
           expectedResponsibleUserId: hermesApiAccountOwner.expectedResponsibleUserId, model: execution.profile.model, runs: selectedRuns,
+          expectedRunStatus,
           accountMode: fixtures.aiConnection.binding.mode,
           ...(execution.profile.managedConnectionRouting ? { expectedGrantId: fixtures.aiConnection.binding.mode === "delegated" ? fixtures.aiConnection.binding.grantId : "" } : {}) });
         if (execution.profile.managedConnectionRouting) {
@@ -3033,7 +3035,7 @@ for (const execution of executions) {
           let receipt: Awaited<ReturnType<typeof captureHermesOpenRouterSettlement>> | undefined;
           try {
             await expect.poll(async () => {
-              receipt = await captureHermesOpenRouterSettlement({ api, ...settlementScope });
+              receipt = await captureHermesOpenRouterSettlement({ api, ...settlementScope, expectedRunStatus });
               return receipt.checks.every(check => check.passed);
             }, { timeout: 30_000, message: "OpenRouter billing must settle without pausing the agent before cleanup" }).toBe(true);
           } finally {

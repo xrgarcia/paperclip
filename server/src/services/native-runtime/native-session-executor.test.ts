@@ -1,3 +1,4 @@
+import { createIssueThreadInteractionSchema } from "@paperclipai/shared";
 import { configuredEnvironmentProjection } from "../../vendor/paperclip-runner/index.js";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { readFileSync } from "node:fs";
@@ -2555,6 +2556,33 @@ describe("runtime question fallback", () => {
     ],
   };
 
+  it.each(["provider_process_lost", "durable_handoff"])("preserves a complete custom-answer batch after %s", reason => {
+    const form = { schema: "paperclip.question_set.v1" as const, questions: [
+      { id: "color", prompt: "Choose color", required: true, answerMode: "single_select" as const,
+        options: [{ id: "cobalt", label: "Cobalt" }], customAnswer: { enabled: true, label: "Another color" } },
+      { id: "targets", prompt: "Choose targets", required: true, answerMode: "multi_select" as const,
+        options: [{ id: "paperclip_custom_answer", label: "Linux" }], customAnswer: { enabled: true, placeholder: "Name a target" } },
+      { id: "notes", prompt: "Describe constraint", required: true, answerMode: "text" as const },
+    ] };
+    const fallback = runtimeQuestionFallbackFromEvent({ eventType: "runtime_request.expired", runId: "00000000-0000-4000-8000-000000000001",
+      payload: { requestId: "native-batch", requestKind: "runtime", requestType: "input", reason, replayAllowed: false,
+        request: { schema: "paperclip.runtime_request.v2", requestKind: "runtime", type: "input", status: "pending",
+          requestId: "native-batch", turnId: "turn", itemId: "item", input: form } } });
+    expect(fallback).not.toBeNull();
+    expect(createIssueThreadInteractionSchema.safeParse(fallback).success).toBe(true);
+    expect(fallback!.payload.questionSet).toEqual(form);
+    expect(fallback!.payload.questions[0]!.options).toEqual([{ id: "cobalt", label: "Cobalt" },
+      { id: "paperclip_custom_answer", label: "Another color", freeText: true }]);
+    expect(fallback!.payload.questions[1]!.options).toEqual([{ id: "paperclip_custom_answer", label: "Linux" },
+      { id: "paperclip_custom_answer_2", label: "Other", description: "Name a target", freeText: true }]);
+    expect(fallback!.payload.questions[1]!.selectionMode).toBe("multi");
+    expect(fallback!.payload.questions[2]!.options[0]!.freeText).toBe(true);
+    const incomplete = structuredClone(fallback!);
+    incomplete.payload.questions[1]!.options.pop();
+    incomplete.payload.questions[1]!.allowOther = false;
+    expect(createIssueThreadInteractionSchema.safeParse(incomplete).success).toBe(false);
+  });
+
   it.each(["provider_process_lost", "durable_handoff"])(
     "materializes one idempotent durable interaction after %s",
     (reason) => {
@@ -2602,7 +2630,7 @@ describe("runtime question fallback", () => {
             {
               id: "replicas",
               selectionMode: "single",
-              options: [{ id: "__paperclip_text__", freeText: true }],
+              options: [{ id: "paperclip_text_answer", freeText: true }],
             },
           ],
         },

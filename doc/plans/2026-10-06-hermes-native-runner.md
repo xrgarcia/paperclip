@@ -1350,3 +1350,49 @@ recovery state is retained; original per-run cost is unavailable and its existin
 allocation hold remains reserved. This attempt does not qualify native Stop.
 Definition version 4 records the corrected navigation and bounded cleanup wait;
 the earlier attempt remains a separate failed measurement.
+
+The corrected Stop campaign at `1b16732f9d5be2d59d21139d10ea6f5e11785d55`
+reaches the real browser Stop control and a same-scope acknowledged cancellation,
+but retains its failed/cleanup-failed grade after 33.304 seconds. Shutdown emits
+a provider-loss input expiry. Its durable fallback drops the legacy custom-answer
+fields, so shared interaction creation rejects two canonical/legacy mismatches
+and the run ends `native_session_interrupted`. The public native receipt reports
+31,700 input and 169 output tokens, with unpriced cost and no ready accounting
+receipt. All nine observed owned process identities have retired by cleanup.
+The private recovery state and unknown-cost hold remain retained.
+
+The form-conversion fix uses the existing shared canonical-to-storage converter
+and passes nine focused fallback regressions, including a mixed custom-answer
+batch, a synthetic-option ID collision and rejection of a genuinely incomplete
+storage form. It preserves the canonical input and keeps shared validation
+strict. Intentional Stop still needs investigation of the provider-loss path,
+followed by new live acceptance; this fix alone does not qualify Stop.
+
+The controller's native terminal mapper caused that provider-loss expiry: it
+expired every pending structured input, including inputs on a confirmed
+cancelled turn. A regression using the production driver and a scripted
+transport reproduced the cancelled-to-expired conversion. The correction uses
+the exact cancelled terminal's turn identity to retire its input once, with a
+canonical cancellation outcome. Completed, failed and interrupted terminals
+retain their prior non-replayable fallback behavior. All 186 related runtime
+and request tests pass, including the four terminal outcomes. Nine fallback
+regressions and direct server/runner TypeScript checks pass.
+
+Definition version 5 also passes the cancelled-run expectation into the shared
+account and OpenRouter settlement checks after the Stop helper returns. The
+earlier definition incorrectly required a successful run at that final shared
+boundary. The browser Stop response is now retained before terminal polling,
+so a later failure does not discard that original public acknowledgement.
+These changes need a fresh paid browser attempt; neither failed attempt is
+regraded, and unknown-cost holds remain reserved.
+
+At `6b3c3a6708a2481a98edaffe15b722b6559dac6e`, cloud Mac native fixtures pass.
+Cloud Linux provisioning fails with HTTP 429 before fixture execution. The
+cloud Docker context check separately fails at Docker Hub's pinned Node image
+manifest request with HTTP 502. Original CI failures remain recorded.
+
+The server's composite typecheck unexpectedly invoked its Rust build. That
+local build is not qualification evidence. The completed build left no live
+compiler; its 850,932,819 bytes of disposable target output were removed and
+the staged runner restored to the verified cloud-built binary. Subsequent
+checks invoke TypeScript directly and perform no local Rust or Docker build.

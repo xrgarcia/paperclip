@@ -264,6 +264,7 @@ export async function runHermesNativeQuestionStop(input: {
   const browserResponse = await response.json();
   identity = { runId: pending.run.id, turnId: pendingEvent.turnId as string, requestId: request.requestId as string,
     questionSet, pendingEvent, companyId: fixtures.company.id, callerUserId: input.callerUserId, browserResponse };
+  await input.evidence("hermes-native-stop-browser-response.json", { identity, checks });
   const stopped = await pollUntil({ label: "Hermes native question cancellation and owned Stop acknowledgement", deadlineAt, intervalMs: 200, load,
     reject: state => ["succeeded", "failed", "timed_out"].includes(state.run.status) ? "Stop did not produce a cancelled native turn" : undefined,
     accept: state => state.interactions.length === 1 && state.interactions[0]?.id === card.id && state.interactions[0]?.status === "expired"
