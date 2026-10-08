@@ -1220,7 +1220,7 @@ export const runnerSuites: readonly RunnerSuiteFixture[] = [
     environments: runnerEnvironments, tasks: [hermesNativeQuestionTask, hermesNativeQuestionStopTask],
     excludedExecutionIds: [`${HERMES_NATIVE_INTERACTION_SUITE}.runner-acpx-hermes.daytona.native-question-batch-stop`], expectedMatrixSize: 3,
     definitionMetadata: {
-      version: 3, qualification: "pending", scheduling: "explicit-only", accountMethod: "api_key", accountMode: "responsible_user",
+      version: 4, qualification: "pending", scheduling: "explicit-only", accountMethod: "api_key", accountMode: "responsible_user",
       providerTurns: 1, lifecycle: "per-turn", nativeMethod: "_hermes/ask_questions", maximumAttemptsPerCell: 1,
       objectiveAdmission: "production-delivery-guard-question-only",
       budgetMonthlyCents: HERMES_API_CONNECTION_BUDGET_CENTS, billing: "reported-cost-and-budget-health",

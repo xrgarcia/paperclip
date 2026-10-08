@@ -211,6 +211,10 @@ export async function runHermesNativeQuestionStop(input: {
   input.registerCleanupAssertion(async () => {
     try {
       const state = await load();
+      if (processes.captured && processes.live.length > 0) {
+        await pollUntil({ label: "Hermes native Stop cleanup retirement", deadlineAt: Date.now() + 5_000, intervalMs: 100,
+          load: async () => { sample(); return processes; }, accept: retired });
+      }
       const passed = complete && retired() && runs.length === 1 && state.interactions.length === 1
         && state.interactions[0]?.id === interactionId && state.interactions[0]?.status === "expired"
         && Boolean(identity && hasHermesNativeQuestionStop({ ...identity, ...state }));
@@ -242,6 +246,7 @@ export async function runHermesNativeQuestionStop(input: {
     && !record(pending.run.resultJson).nativeCancellation, "One complete native callback remains unanswered in its original active turn before Stop.");
   interactionId = card.id;
   await input.evidence("hermes-native-stop-pending.json", { card, event: pendingEvent, processes, checks });
+  await page.goto(`/${fixtures.company.issuePrefix}/issues/${issue.identifier ?? issue.id}`);
   await page.getByRole("radio", { name: questionSet.questions[0].options[0].label, exact: true }).last().waitFor({ state: "visible" });
   await input.capture("hermes-native-stop-pending", "Unanswered native Hermes question before browser Stop", "hermes-native-stop-pending.png");
   check("owned-live-process-tree", processes.captured && processes.journal.length >= 2 && processes.live.length >= 2 && !processIdentityChanged,

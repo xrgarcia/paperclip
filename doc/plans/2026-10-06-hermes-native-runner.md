@@ -1337,3 +1337,16 @@ settle cancelled-run reported usage, and prove the public per-turn owner and
 observed descendants retire before and through cleanup. This cell is pending
 live qualification. Remote Stop still needs its own remote retirement observer.
 No local Docker or Rust build is used.
+
+The first local Stop campaign at `6b3c3a6708a2481a98edaffe15b722b6559dac6e`
+retains its failed/cleanup-failed machine grade after 58.637 seconds. It captured
+one genuine unanswered native batch and seven owned process identities, but the
+new driver remained on the task list with Search open and timed out before
+clicking Stop. The correction explicitly navigates to the canonical task route
+before reading the native form. Cleanup now waits up to five seconds for
+observed process retirement before its assertion. A later read-only audit
+confirmed none of the seven retained PID/start identities remained. The private
+recovery state is retained; original per-run cost is unavailable and its existing
+allocation hold remains reserved. This attempt does not qualify native Stop.
+Definition version 4 records the corrected navigation and bounded cleanup wait;
+the earlier attempt remains a separate failed measurement.
