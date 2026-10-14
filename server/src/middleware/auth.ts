@@ -57,6 +57,7 @@ function pruneCloudTenantWriteDebounce(
 import { instanceSettingsService } from "../services/instance-settings.js";
 import { ensureHumanRoleDefaultGrants } from "../services/principal-access-compatibility.js";
 import { forbidden, unauthorized, unprocessable } from "../errors.js";
+import { COMMENT_ONLY_KEY_ROUTE_DENIED, commentOnlyKeyDenial } from "./comment-only-key.js";
 
 export { isCloudManagedInstance } from "../services/cloud-instance.js";
 import { cloudTenantPrimaryCompanyId } from "../services/cloud-instance.js";
@@ -435,6 +436,11 @@ export function actorMiddleware(db: Db, opts: ActorMiddlewareOptions): RequestHa
         onBehalfOfMemberships,
         source: "agent_jwt",
       };
+      const commentOnlyDenied = commentOnlyKeyDenial(req, req.actor.keyScope);
+      if (commentOnlyDenied) {
+        next(forbidden(commentOnlyDenied, { code: COMMENT_ONLY_KEY_ROUTE_DENIED }));
+        return;
+      }
       next();
       return;
     }
@@ -492,6 +498,12 @@ export function actorMiddleware(db: Db, opts: ActorMiddlewareOptions): RequestHa
       runId: runIdHeader || undefined,
       source: "agent_key",
     };
+
+    const commentOnlyDenied = commentOnlyKeyDenial(req, req.actor.keyScope);
+    if (commentOnlyDenied) {
+      next(forbidden(commentOnlyDenied, { code: COMMENT_ONLY_KEY_ROUTE_DENIED }));
+      return;
+    }
 
     next();
   };

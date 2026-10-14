@@ -3772,6 +3772,16 @@ export function issueRoutes(
     kind: CrossIssueInfluenceKind,
   ) {
     if (req.actor.type !== "agent") return true;
+    // Slashbin patch: a comment-only key has no run by design. Its comment is
+    // bounded by the key itself — one issue, comments only, minted by a board
+    // user (middleware/comment-only-key.ts) — not by a run's influence cap.
+    if (
+      kind === "comment" &&
+      !req.actor.runId &&
+      req.actor.keyScope?.kind === "comment_only" &&
+      req.actor.keyScope.issueId === issue.id
+    )
+      return true;
     if (!req.actor.agentId || !req.actor.runId)
       throw crossIssueInfluenceRunContextError();
 

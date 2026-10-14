@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
 # Install Slashbin's Paperclip build: the official npm release, with this fork's
-# @paperclipai/shared and UI laid over it.
+# @paperclipai/shared, UI and patched server files laid over it.
 #
 # Why an overlay and not a full source build: the full build compiles a Rust runner
-# and a C native module, and our patches touch neither. They live only in
-# packages/shared and ui (see slashbin/PATCHES.md), so the server, CLI and adapters
-# run exactly as published.
+# and a C native module, and our patches touch neither. They live in packages/shared,
+# ui and the few server files server-overlay.sh lists (see slashbin/PATCHES.md), so
+# every other server file, the CLI and the adapters run exactly as published.
 #
 # Usage:  slashbin/install.sh            # build + install into $PREFIX
 # Then:   systemctl --user restart paperclip.service
@@ -34,14 +34,15 @@ trap 'rm -rf "$stage"' EXIT
 npm install --prefix "$stage" --no-audit --no-fund "paperclipai@$VERSION" >/dev/null
 
 mods="$stage/node_modules/@paperclipai"
-for target in "$mods/shared/dist" "$mods/server/ui-dist"; do
-  [ -d "$target" ] || { echo "published layout changed: $target missing" >&2; exit 1; }
+for target in "$mods/shared/dist" "$mods/server/ui-dist" "$mods/server/dist/middleware/auth.js" "$mods/server/dist/routes/issues.js"; do
+  [ -e "$target" ] || { echo "published layout changed: $target missing" >&2; exit 1; }
 done
 
 echo "==> Overlaying fork build"
 rm -rf "$mods/shared/dist" "$mods/server/ui-dist"
 cp -r packages/shared/dist "$mods/shared/dist"
 cp -r ui/dist "$mods/server/ui-dist"
+slashbin/server-overlay.sh "$mods/server/dist"
 git rev-parse HEAD > "$stage/SLASHBIN_COMMIT"
 
 rm -rf "$PREFIX.old"

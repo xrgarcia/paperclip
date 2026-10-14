@@ -196,15 +196,25 @@ export const skillTestAgentKeyScopeSchema = z.object({
   issueId: z.string().guid(),
 }).strict();
 
+// Slashbin patch: a key that may post comments on one issue and do nothing else,
+// for an agent that acts outside any heartbeat run (Nova, on a board user's
+// behalf). The server confines it to that one route (middleware/comment-only-key.ts).
+export const commentOnlyAgentKeyScopeSchema = z.object({
+  kind: z.literal("comment_only"),
+  issueId: z.string().guid(),
+}).strict();
+
 export const agentApiKeyScopeSchema = z.union([
   standardAgentKeyScopeSchema,
   taskBridgeAgentKeyScopeSchema,
   skillTestAgentKeyScopeSchema,
+  commentOnlyAgentKeyScopeSchema,
 ]);
 
 export type AgentApiKeyScope = z.infer<typeof agentApiKeyScopeSchema>;
 export type TaskBridgeAgentKeyScope = z.infer<typeof taskBridgeAgentKeyScopeSchema>;
 export type SkillTestAgentKeyScope = z.infer<typeof skillTestAgentKeyScopeSchema>;
+export type CommentOnlyAgentKeyScope = z.infer<typeof commentOnlyAgentKeyScopeSchema>;
 
 export function normalizeAgentApiKeyScope(value: unknown): AgentApiKeyScope {
   const parsed = agentApiKeyScopeSchema.safeParse(value);

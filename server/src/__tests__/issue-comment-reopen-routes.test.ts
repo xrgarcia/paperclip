@@ -2631,6 +2631,113 @@ describe.sequential("issue comment reopen routes", () => {
     },
   );
 
+  // Slashbin patch: a comment-only key acts with no run, on one issue only.
+  describe("comment_only agent keys", () => {
+    const commentOnlyActor = (scopedIssueId = "11111111-1111-4111-8111-111111111111") => ({
+      type: "agent",
+      agentId: "33333333-3333-4333-8333-333333333333",
+      companyId: "company-1",
+      source: "agent_key",
+      keyScope: { kind: "comment_only", issueId: scopedIssueId },
+      runId: undefined,
+    });
+    const allowVisibleWrites = () =>
+      mockAccessService.decide.mockImplementation(
+        async (input: { action?: string }) => ({
+          allowed: input.action !== "tasks:manage_active_checkouts",
+          action: input.action,
+          reason:
+            input.action === "issue:comment"
+              ? "allow_visible_issue_write"
+              : "allow_explicit_grant",
+          explanation: "Allowed by the shared visible-issue write rule.",
+        }),
+      );
+
+    it.each(["in_progress", "done", "blocked"] as const)(
+      "comments without a run on its own issue (%s, another agent's) and changes nothing else",
+      async (status) => {
+        mockIssueService.getById.mockResolvedValue(makeIssue(status));
+        mockIssueService.addComment.mockResolvedValue({
+          id: "comment-1",
+          issueId: "11111111-1111-4111-8111-111111111111",
+          companyId: "company-1",
+          body: "on Ray's behalf",
+          createdAt: new Date(),
+          updatedAt: new Date(),
+          authorAgentId: "33333333-3333-4333-8333-333333333333",
+          authorUserId: null,
+        });
+        allowVisibleWrites();
+
+        const res = await request(
+          await installActor(createApp(), commentOnlyActor()),
+        )
+          .post("/api/issues/11111111-1111-4111-8111-111111111111/comments")
+          .send({ body: "on Ray's behalf" });
+
+        expect(res.status, JSON.stringify(res.body)).toBe(201);
+        expect(mockIssueService.addComment).toHaveBeenCalledTimes(1);
+        expect(mockIssueService.update).not.toHaveBeenCalled();
+        expect(mockObserveCrossIssueInfluence).not.toHaveBeenCalled();
+      },
+    );
+
+    it("still needs a run to comment on an issue outside its scope", async () => {
+      mockIssueService.getById.mockResolvedValue(makeIssue("todo"));
+      allowVisibleWrites();
+
+      const res = await request(
+        await installActor(
+          createApp(),
+          commentOnlyActor("99999999-9999-4999-8999-999999999999"),
+        ),
+      )
+        .post("/api/issues/11111111-1111-4111-8111-111111111111/comments")
+        .send({ body: "elsewhere" });
+
+      expect(res.status).toBe(403);
+      expect(res.body.details).toEqual({
+        code: "cross_issue_influence_run_context_required",
+      });
+      expect(mockIssueService.addComment).not.toHaveBeenCalled();
+    });
+
+    it("still needs a run to update its own issue", async () => {
+      mockIssueService.getById.mockResolvedValue(makeIssue("todo"));
+      allowVisibleWrites();
+
+      const res = await request(
+        await installActor(createApp(), commentOnlyActor()),
+      )
+        .patch("/api/issues/11111111-1111-4111-8111-111111111111")
+        .send({ title: "not a comment" });
+
+      expect(res.status).toBe(403);
+      expect(mockIssueService.update).not.toHaveBeenCalled();
+    });
+
+    it("a standard key without a run is still refused", async () => {
+      mockIssueService.getById.mockResolvedValue(makeIssue("done"));
+      allowVisibleWrites();
+
+      const res = await request(
+        await installActor(createApp(), {
+          ...commentOnlyActor(),
+          keyScope: { kind: "standard" },
+        }),
+      )
+        .post("/api/issues/11111111-1111-4111-8111-111111111111/comments")
+        .send({ body: "no run" });
+
+      expect(res.status).toBe(403);
+      expect(res.body.details).toEqual({
+        code: "cross_issue_influence_run_context_required",
+      });
+      expect(mockIssueService.addComment).not.toHaveBeenCalled();
+    });
+  });
+
   it.each(["invalid", "wrong agent", "wrong company"])(
     "rejects comment and PATCH writes with a %s run",
     async () => {
