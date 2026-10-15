@@ -8,6 +8,7 @@ Branch `slashbin` = upstream tag `v2026.1005.0` + the commits below. Install wit
 |---|---|---|
 | Uploaded image avatars per agent | upstream PR paperclipai/paperclip#15095 (open), cherry-picked with `-x` | `packages/shared`, `ui` |
 | Comment-only agent keys: a key minted by a board user with scope `{kind: "comment_only", issueId}` may post comments on that one issue with no heartbeat run, and reach no other route | Slashbin (EM#599: Nova comments for a ChatGPT user, outside any run) | `packages/shared`, `server` (`middleware/auth.ts`, `middleware/comment-only-key.ts`, `routes/issues.ts`) |
+| Bridged seats reconcile their own lost legacy run: the assignee agent of a `process`-adapter seat may send `executionReconciliation` to `POST /issues/:id/recovery-actions/resolve` for a `legacy_execution_requires_reconciliation` hold (outcome `restored`, status `todo`). Every other check (run owner, terminal status, live pid, leases) is unchanged; other seats and causes still need the board | Slashbin (EM#609: a lost bridge waiter left a hidden no-replay hold that only a board operator could clear, with nothing for them to inspect) | `server` (`routes/issues.ts`) |
 
 **Rule: patches stay inside `packages/shared`, `ui`, and the server files listed in
 `server-overlay.sh`.** `install.sh` and the Railway image (EM repo

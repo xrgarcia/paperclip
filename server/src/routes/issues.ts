@@ -9071,6 +9071,23 @@ export function issueRoutes(
       if (outcome === "false_positive" || outcome === "cancelled") {
         assertBoard(req);
       }
+      // Slashbin patch (EM#609): a bridged seat (adapter `process`) waits on a
+      // worker Paperclip cannot see, so a lost wait leaves a legacy hold with
+      // nothing for a board operator to inspect. The assignee agent may submit
+      // the same executionReconciliation for its own stopped run; every other
+      // check below (run owner, terminal status, live pid, leases) still runs.
+      const bridgedSelf =
+        req.actor.type === "agent" && !!req.actor.agentId &&
+        !!executionReconciliation && outcome === "restored" &&
+        sourceIssueStatus === "todo" &&
+        existing.assigneeAgentId === req.actor.agentId &&
+        (await db.select({ adapterType: agents.adapterType }).from(agents)
+          .where(and(eq(agents.id, req.actor.agentId), eq(agents.companyId, existing.companyId)))
+          .then((rows) => rows[0]?.adapterType === "process"));
+      const assertBoardOrBridgedSelf = (cause: string | null | undefined) => {
+        if (bridgedSelf && cause === "legacy_execution_requires_reconciliation") return;
+        assertBoard(req);
+      };
 
       const actor = getActorInfo(req);
       const actionStatus = outcome === "cancelled" ? "cancelled" : "resolved";
@@ -9122,7 +9139,7 @@ export function issueRoutes(
             if (automatic?.replay === "blocked" && executionReconciliation) {
               // An automatic no-replay disposition is final until new evidence
               // arrives. Keep the supported evidence API usable without a dialog.
-              assertBoard(req);
+              assertBoardOrBridgedSelf(settled.cause);
               if (
                 activeRecoveryAction ||
                 sourceIssueStatus !== "todo" ||
@@ -9231,7 +9248,7 @@ export function issueRoutes(
           sourceIssueStatus === "todo" &&
           requiresExecutionReconciliation(activeRecoveryAction.cause)
         ) {
-          assertBoard(req);
+          assertBoardOrBridgedSelf(activeRecoveryAction.cause);
           await validateExecutionReconciliation({
             db: tx as unknown as Db,
             companyId: lockedIssue.companyId,

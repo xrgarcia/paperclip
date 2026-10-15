@@ -1806,6 +1806,47 @@ describeEmbeddedPostgres("issue recovery actions", () => {
     expect((await db.select().from(issueRecoveryActions).where(eq(issueRecoveryActions.id, action!.id)))[0]).toEqual(recorded);
   });
 
+  // Slashbin patch (EM#609): a bridged seat reconciles its own lost legacy run.
+  async function seedBridgedLegacyHold(input: { adapterType: string; cause: string }) {
+    const fixture = await seedCompany();
+    await db.update(agents).set({ adapterType: input.adapterType }).where(eq(agents.id, fixture.coderId));
+    const runId = randomUUID();
+    await seedHeartbeatRun({ companyId: fixture.companyId, agentId: fixture.coderId, runId, issueId: fixture.sourceIssueId, status: "failed" });
+    await db.update(issues).set({ status: "blocked" }).where(eq(issues.id, fixture.sourceIssueId));
+    const otherIssueId = randomUUID();
+    await db.insert(issues).values({ id: otherIssueId, companyId: fixture.companyId, title: "Repair task",
+      status: "in_progress", priority: "medium", assigneeAgentId: fixture.coderId, issueNumber: 2, identifier: `${fixture.prefix}-2` });
+    const liveRunId = randomUUID();
+    await seedHeartbeatRun({ companyId: fixture.companyId, agentId: fixture.coderId, runId: liveRunId, issueId: otherIssueId });
+    const [action] = await db.insert(issueRecoveryActions).values({
+      companyId: fixture.companyId, sourceIssueId: fixture.sourceIssueId, kind: "active_run_watchdog", status: "resolved", outcome: "blocked",
+      ownerType: "board", returnOwnerAgentId: fixture.coderId, cause: input.cause, fingerprint: `legacy-execution:${runId}`,
+      nextAction: "Automatic recovery stopped.",
+      evidence: { runId, automaticRecovery: { replay: "blocked", actionOutcome: "unknown" } },
+    }).returning();
+    const app = createApp({ type: "agent", agentId: fixture.coderId, companyId: fixture.companyId, runId: liveRunId, source: "agent_key" });
+    const body = { actionId: action!.id, outcome: "restored", sourceIssueStatus: "todo",
+      executionReconciliation: { runId, providerStopped: true, actionOutcome: "completed",
+        outcomeEvidence: "The bridge worker finished and posted its result; only the board waiter was lost." } };
+    return { ...fixture, app, body };
+  }
+
+  it("lets a bridged (process) assignee reconcile its own lost legacy run", async () => {
+    const { app, body, sourceIssueId } = await seedBridgedLegacyHold({ adapterType: "process", cause: "legacy_execution_requires_reconciliation" });
+    const res = await request(app).post(`/api/issues/${sourceIssueId}/recovery-actions/resolve`).send(body);
+    expect(res.status, JSON.stringify(res.body)).toBe(200);
+    expect(res.body.issue.status).toBe("todo");
+  });
+
+  it.each([
+    ["codex_local", "legacy_execution_requires_reconciliation"],
+    ["process", "uncertain_external_action"],
+  ])("still requires the board for a %s seat with cause %s", async (adapterType, cause) => {
+    const { app, body, sourceIssueId } = await seedBridgedLegacyHold({ adapterType, cause });
+    await request(app).post(`/api/issues/${sourceIssueId}/recovery-actions/resolve`).send(body).expect(403);
+    expect((await db.select().from(issues).where(eq(issues.id, sourceIssueId)))[0]!.status).toBe("blocked");
+  });
+
   async function seedReconciledDelivery() {
     const fixture = await seedCompany();
     const { companyId, coderId, sourceIssueId } = fixture;
