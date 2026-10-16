@@ -3,6 +3,8 @@ node_modules/
 **/node_modules
 **/node_modules/
 dist/
+# a dist symlink (a local build link) is not a directory, so dist/ misses it
+dist
 dist-preview/
 dist-flow-preview/
 server/ui-dist/
