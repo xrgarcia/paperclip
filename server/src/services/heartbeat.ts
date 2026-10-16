@@ -27587,7 +27587,8 @@ export function heartbeatService(
                 !existingRun ||
                 existingRun.contextSnapshot?.issueId !== issue.id ||
                 existingRun.contextSnapshot?.recoveryActionId !== action.id ||
-                existingRun.contextSnapshot?.previousRunId !== sourceRunId
+                (existingRun.contextSnapshot?.previousRunId ??
+                  existingRun.contextSnapshot?.orphanedSourceRunId) !== sourceRunId
               )
                 return { kind: "deferred" as const };
               return { kind: "replayed" as const, run: existingRun };
@@ -27605,8 +27606,16 @@ export function heartbeatService(
             }
             reconciledSourceRunId = sourceRunId;
             // Slashbin patch (EM#608): a hold settled after its agent was deleted
-            // names a run that is gone; the continuation runs without the link.
+            // names a run that is gone. The continuation runs from the task's own
+            // context: no FK link and no resume reference to the missing run.
             reconciledSourceRunExists = !!reconciledRun;
+            if (!reconciledRun) {
+              if (action.evidence.orphanedSourceRun !== true)
+                return { kind: "skipped" as const };
+              delete enrichedContextSnapshot.previousRunId;
+              delete enrichedContextSnapshot.retryOfRunId;
+              enrichedContextSnapshot.orphanedSourceRunId = sourceRunId;
+            }
           }
 
           let continuationWait = { reason: "execution_recovery", message: "Waiting for execution recovery. Your message is saved." };
