@@ -247,6 +247,9 @@ export async function deliverReconciledExecutions(
           .where(pendingDecision);
         continue;
       }
+      // Slashbin patch (EM#608): a hold settled after its source run was
+      // deleted has no run left to link the continuation to.
+      const orphaned = action.evidence.orphanedSourceRun === true;
       const run = await wake(action.returnOwnerAgentId, {
         source: "automation",
         triggerDetail: "system",
@@ -268,7 +271,7 @@ export async function deliverReconciledExecutions(
       });
       if (run)
         await db.transaction(async (tx) => {
-          await tx
+          if (!orphaned) await tx
             .update(heartbeatRuns)
             .set({ retryOfRunId: decision.runId })
             .where(
@@ -292,9 +295,9 @@ export async function deliverReconciledExecutions(
             })
             .where(pendingDecision);
         });
-    } catch {
+    } catch (err) {
       logger.warn(
-        { recoveryActionId: action.id },
+        { recoveryActionId: action.id, err },
         "Reconciled execution continuation remains pending for retry",
       );
     }
