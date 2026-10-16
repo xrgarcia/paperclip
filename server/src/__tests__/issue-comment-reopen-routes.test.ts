@@ -2738,6 +2738,87 @@ describe.sequential("issue comment reopen routes", () => {
     });
   });
 
+  // Slashbin patch: an admin board key credits its comment to another author
+  // (middleware/comment-author.ts); everything else still acts as the board user.
+  describe("credited comment authors", () => {
+    const EM = "44444444-4444-4444-8444-444444444444";
+    const syncKey = (companyIds = ["company-1"]) => ({
+      type: "board",
+      userId: "ray",
+      companyIds: ["company-1"],
+      source: "board_key",
+      isInstanceAdmin: true,
+      commentAuthor: { kind: "agent", agentId: EM, companyIds },
+    });
+    const HEADER = "x-slashbin-comment-author";
+
+    it("saves a POSTed comment under the credited agent", async () => {
+      mockIssueService.getById.mockResolvedValue(makeIssue("todo"));
+      const res = await request(await installActor(createApp(), syncKey()))
+        .post("/api/issues/11111111-1111-4111-8111-111111111111/comments")
+        .set(HEADER, `agent:${EM}`)
+        .send({ body: "said on GitHub" });
+
+      expect(res.status, JSON.stringify(res.body)).toBe(201);
+      expect(mockIssueService.addComment).toHaveBeenCalledTimes(1);
+      const [, , author, options] = mockIssueService.addComment.mock.calls[0]!;
+      expect(author).toEqual({ agentId: EM, runId: null, onBehalfOfUserId: "ray" });
+      expect(options.authorType).toBe("agent");
+    });
+
+    it("saves a PATCH's inline comment under the credited agent, and still updates the issue as the board", async () => {
+      mockIssueService.getById.mockResolvedValue(makeIssue("todo"));
+      mockIssueService.update.mockImplementation(
+        async (_id: string, patch: Record<string, unknown>) => ({ ...makeIssue("todo"), ...patch }),
+      );
+      const res = await request(await installActor(createApp(), syncKey()))
+        .patch("/api/issues/11111111-1111-4111-8111-111111111111")
+        .set(HEADER, `agent:${EM}`)
+        .send({ title: "renamed on GitHub", comment: "held on GitHub" });
+
+      expect(res.status, JSON.stringify(res.body)).toBe(200);
+      expect(mockIssueService.update).toHaveBeenCalled();
+      const [, , author] = mockIssueService.addComment.mock.calls[0]!;
+      expect(author).toEqual({ agentId: EM, runId: null, onBehalfOfUserId: "ray" });
+    });
+
+    it("refuses an author who is not on the issue's company", async () => {
+      mockIssueService.getById.mockResolvedValue(makeIssue("todo"));
+      const res = await request(await installActor(createApp(), syncKey(["company-2"])))
+        .post("/api/issues/11111111-1111-4111-8111-111111111111/comments")
+        .set(HEADER, `agent:${EM}`)
+        .send({ body: "elsewhere" });
+
+      expect(res.status).toBe(422);
+      expect(res.body.details).toEqual({ code: "comment_author_override_invalid" });
+      expect(mockIssueService.addComment).not.toHaveBeenCalled();
+    });
+
+    it("refuses the header from any caller it was not resolved for", async () => {
+      mockIssueService.getById.mockResolvedValue(makeIssue("todo"));
+      const res = await request(await installActor(createApp()))
+        .post("/api/issues/11111111-1111-4111-8111-111111111111/comments")
+        .set(HEADER, `agent:${EM}`)
+        .send({ body: "not mine to credit" });
+
+      expect(res.status).toBe(403);
+      expect(res.body.details).toEqual({ code: "comment_author_override_denied" });
+      expect(mockIssueService.addComment).not.toHaveBeenCalled();
+    });
+
+    it("leaves a comment without the header as the caller's own", async () => {
+      mockIssueService.getById.mockResolvedValue(makeIssue("todo"));
+      const res = await request(await installActor(createApp()))
+        .post("/api/issues/11111111-1111-4111-8111-111111111111/comments")
+        .send({ body: "mine" });
+
+      expect(res.status, JSON.stringify(res.body)).toBe(201);
+      const [, , author] = mockIssueService.addComment.mock.calls[0]!;
+      expect(author.userId).toBe("local-board");
+      expect(author.agentId).toBeUndefined();
+    });
+  });
+
   it.each(["invalid", "wrong agent", "wrong company"])(
     "rejects comment and PATCH writes with a %s run",
     async () => {

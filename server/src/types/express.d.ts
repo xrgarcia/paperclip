@@ -1,6 +1,7 @@
 export {};
 
 import type { AgentApiKeyScope } from "@paperclipai/shared";
+import type { CommentAuthorOverride } from "../middleware/comment-author.js";
 
 declare global {
   namespace Express {
@@ -30,6 +31,8 @@ declare global {
         runId?: string;
         onBehalfOfUserId?: string | null;
         identityContextId?: string | null;
+        /** Slashbin patch: the author a board key credits its comments to (middleware/comment-author.ts). */
+        commentAuthor?: CommentAuthorOverride;
         source?: "local_implicit" | "session" | "board_key" | "agent_key" | "agent_jwt" | "cloud_tenant" | "cloud_control" | "none";
       };
     }

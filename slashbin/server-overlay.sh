@@ -11,6 +11,7 @@ set -euo pipefail
 # Paths under server/src. Add a file here when a patch touches it (PATCHES.md).
 SERVER_FILES=(
   middleware/auth.ts
+  middleware/comment-author.ts
   middleware/comment-only-key.ts
   routes/issues.ts
 )
