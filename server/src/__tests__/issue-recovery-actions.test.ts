@@ -1874,6 +1874,44 @@ describeEmbeddedPostgres("issue recovery actions", () => {
     expect(settled!.evidence.automaticRecovery).toBeUndefined();
   });
 
+  it("returns an orphaned hold's continuation to the task's current assignee", async () => {
+    const { action, reconciliation, sourceIssueId, coderId } = await seedOrphanedLegacyHold();
+    await request(createApp()).post(`/api/issues/${sourceIssueId}/recovery-actions/resolve`)
+      .send({ actionId: action.id, outcome: "restored", sourceIssueStatus: "todo", executionReconciliation: reconciliation })
+      .expect(200);
+    const [settled] = await db.select().from(issueRecoveryActions).where(eq(issueRecoveryActions.id, action.id));
+    expect(settled!.returnOwnerAgentId).toBe(coderId);
+    expect(settled!.evidence).toMatchObject({ continuationDelivery: "pending" });
+    const woken: string[] = [];
+    await deliverReconciledExecutions(db, async (agentId) => { woken.push(agentId); return null; });
+    expect(woken).toEqual([coderId]);
+  });
+
+  it("closes out undeliverable reconciliations so they cannot starve another company's delivery", async () => {
+    const orphans: string[] = [];
+    for (let i = 0; i < 25; i++) {
+      const { companyId, sourceIssueId } = await seedCompany();
+      const runId = randomUUID();
+      const [row] = await db.insert(issueRecoveryActions).values({
+        companyId, sourceIssueId, kind: "active_run_watchdog", status: "resolved", outcome: "restored",
+        ownerType: "board", returnOwnerAgentId: null, cause: "legacy_execution_requires_reconciliation", fingerprint: runId,
+        nextAction: "Continue.",
+        evidence: { runId, continuationDelivery: "pending",
+          executionReconciliation: { runId, providerStopped: true, actionOutcome: "not_performed", outcomeEvidence: "Owner deleted." } },
+      }).returning();
+      orphans.push(row!.id);
+    }
+    const { action, heartbeat } = await seedReconciledDelivery();
+    await deliverReconciledExecutions(db, heartbeat.wakeup);
+    await deliverReconciledExecutions(db, heartbeat.wakeup);
+    for (const id of orphans) {
+      const [row] = await db.select().from(issueRecoveryActions).where(eq(issueRecoveryActions.id, id));
+      expect(row!.evidence).toMatchObject({ continuationDelivery: "invalidated" });
+    }
+    const [valid] = await db.select().from(issueRecoveryActions).where(eq(issueRecoveryActions.id, action.id));
+    expect(valid!.evidence).toMatchObject({ continuationDelivery: "delivered" });
+  });
+
   it("still refuses an orphaned-hold reconciliation that names another run", async () => {
     const { action, reconciliation, sourceIssueId } = await seedOrphanedLegacyHold();
     await request(createApp()).post(`/api/issues/${sourceIssueId}/recovery-actions/resolve`)

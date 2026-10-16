@@ -9249,6 +9249,7 @@ export function issueRoutes(
           }
         }
 
+        let orphanedSource = false;
         if (
           sourceIssueStatus === "todo" &&
           requiresExecutionReconciliation(activeRecoveryAction.cause)
@@ -9262,7 +9263,7 @@ export function issueRoutes(
           // anything to check it against and defers every wake of the task's next
           // assignee. A board operator may record outcomes for a hold whose source
           // run no longer exists; nothing is left running to stop or inspect.
-          const orphanedSource =
+          orphanedSource =
             req.actor.type === "board" &&
             !!lockedIssue.assigneeAgentId &&
             typeof sourceRunId === "string" &&
@@ -9348,6 +9349,11 @@ export function issueRoutes(
             actor.actorId,
             chatRetry
               ? { kind: "chat_failed_run_retry", actionId: chatRetry.actionId }
+              : undefined,
+            orphanedSource &&
+              !activeRecoveryAction.returnOwnerAgentId &&
+              lockedIssue.assigneeAgentId
+              ? lockedIssue.assigneeAgentId
               : undefined,
           );
         }

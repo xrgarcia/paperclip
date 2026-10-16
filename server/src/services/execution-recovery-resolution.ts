@@ -142,6 +142,11 @@ export async function markExecutionReconciliation(
   decision: ExecutionReconciliation,
   actorId: string,
   deliveryOwner?: { kind: "chat_failed_run_retry"; actionId: string },
+  // Slashbin patch (EM#608): an orphaned hold's return owner was deleted with
+  // its agent (FK set null). The board restored the task to its current
+  // assignee, so the continuation returns there; without an owner the worker
+  // could never deliver it.
+  adoptReturnOwnerAgentId?: string,
 ) {
   if (deliveryOwner) {
     const [retry] = await db
@@ -190,6 +195,7 @@ export async function markExecutionReconciliation(
         continuationDelivery: deliveryOwner ? "delegated" : "pending",
         ...(deliveryOwner ? { continuationDeliveryOwner: deliveryOwner } : {}),
       },
+      ...(adoptReturnOwnerAgentId ? { returnOwnerAgentId: adoptReturnOwnerAgentId } : {}),
     })
     .where(
       and(
@@ -217,7 +223,25 @@ export async function deliverReconciledExecutions(
     try {
       const decision = action.evidence.executionReconciliation as
         ExecutionReconciliation | undefined;
-      if (!decision || !action.returnOwnerAgentId) continue;
+      // Slashbin patch (EM#608): a record that can never be delivered is
+      // closed out, not skipped — skipped records keep their place in the
+      // batch, and 25 of them would starve every other company's delivery.
+      if (!decision || !action.returnOwnerAgentId) {
+        await db
+          .update(issueRecoveryActions)
+          .set({
+            evidence: sql`${issueRecoveryActions.evidence} || '{"continuationDelivery":"invalidated"}'::jsonb`,
+          })
+          .where(
+            and(
+              eq(issueRecoveryActions.companyId, action.companyId),
+              eq(issueRecoveryActions.id, action.id),
+              eq(issueRecoveryActions.status, "resolved"),
+              sql`${issueRecoveryActions.evidence}->>'continuationDelivery' = 'pending'`,
+            ),
+          );
+        continue;
+      }
       const pendingDecision = and(
         eq(issueRecoveryActions.companyId, action.companyId),
         eq(issueRecoveryActions.id, action.id),
