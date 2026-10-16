@@ -58,7 +58,7 @@ import { instanceSettingsService } from "../services/instance-settings.js";
 import { ensureHumanRoleDefaultGrants } from "../services/principal-access-compatibility.js";
 import { forbidden, unauthorized, unprocessable } from "../errors.js";
 import { COMMENT_ONLY_KEY_ROUTE_DENIED, commentOnlyKeyDenial } from "./comment-only-key.js";
-import { resolveCommentAuthor } from "./comment-author.js";
+import { nextCredited, resolveCommentAuthor } from "./comment-author.js";
 
 export { isCloudManagedInstance } from "../services/cloud-instance.js";
 import { cloudTenantPrimaryCompanyId } from "../services/cloud-instance.js";
@@ -340,7 +340,7 @@ export function actorMiddleware(db: Db, opts: ActorMiddlewareOptions): RequestHa
           next(authorRefused);
           return;
         }
-        next();
+        nextCredited(req, next);
         return;
       }
     }

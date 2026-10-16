@@ -1,16 +1,19 @@
 // Slashbin patch (slashbin/PATCHES.md): an instance-admin board key may credit a
-// comment it posts to another identity on the board, named by one header:
+// comment it posts, and the activity its request logs, to another identity on the
+// board, named by one header:
 //
 //   x-slashbin-comment-author: agent:<agentId> | user:<userId>
 //
 // For a sync that copies what someone said elsewhere (GitHub) onto a card: the
-// comment shows who said it, not whose key carried it. Only the comment's author
-// changes. The request still acts as the board user, so authorization, the
-// activity log and every status, review and reopen rule see the real caller, and an
+// comment shows who said it, not whose key carried it, and the activity feed shows
+// who acted. Only the comment's author changes, and the activity row gains a display
+// credit in its details: the request still acts as the board user, so authorization,
+// the activity row's actor and every status, review and reopen rule see the real caller, and an
 // admin board key can already write anything an agent can. The header is refused
 // on any other caller, and an author that is not on the issue's company is a 422,
 // so a write is never silently credited to the key's own user.
-import type { Request } from "express";
+import { AsyncLocalStorage } from "node:async_hooks";
+import type { NextFunction, Request } from "express";
 import { and, eq } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
 import { agents, companyMemberships } from "@paperclipai/db";
@@ -105,4 +108,39 @@ export function creditedCommentAuthor(req: Request, companyId: string, author: C
 /** The authorType for a comment the request credits, else `fallback`. */
 export function creditedCommentAuthorType<T>(req: Request, fallback: T): T | "agent" | "user" {
   return req.actor.commentAuthor?.kind ?? fallback;
+}
+
+const creditedRequest = new AsyncLocalStorage<CommentAuthorOverride>();
+
+/** Runs the rest of the request with its credited author in scope, for the activity log. */
+export function nextCredited(req: Request, next: NextFunction): void {
+  const credited = req.actor.commentAuthor;
+  if (credited) creditedRequest.run(credited, next);
+  else next();
+}
+
+type ActivityRow = { companyId: string; actorType: string };
+
+/**
+ * The details an activity row is saved with, plus `creditedActor` when a credited
+ * request logs it as the board user: the feed displays that author (ui
+ * lib/credited-actor.ts). The row's actor, agent and responsible user stay the board
+ * user, so the review, confirmation and cleanup rules that read them are unchanged.
+ * A caller-supplied `creditedActor` is always dropped, so only this request's header sets it.
+ */
+export function creditedActivityDetails(
+  row: ActivityRow,
+  details: Record<string, unknown> | null,
+): Record<string, unknown> | null {
+  let own = details;
+  if (own && "creditedActor" in own) {
+    const { creditedActor: _dropped, ...rest } = own;
+    own = rest;
+  }
+  const credited = creditedRequest.getStore();
+  if (!credited || row.actorType !== "user" || !credited.companyIds.includes(row.companyId)) return own;
+  const creditedActor = credited.kind === "agent"
+    ? { type: "agent", id: credited.agentId }
+    : { type: "user", id: credited.userId };
+  return { ...(own ?? {}), creditedActor };
 }
