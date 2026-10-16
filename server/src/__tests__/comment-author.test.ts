@@ -1,6 +1,6 @@
 // Slashbin patch: resolving x-slashbin-comment-author (middleware/comment-author.ts).
 import { describe, expect, it } from "vitest";
-import { parseCommentAuthor, resolveCommentAuthor } from "../middleware/comment-author.js";
+import { creditedActivityActor, nextCredited, parseCommentAuthor, resolveCommentAuthor } from "../middleware/comment-author.js";
 
 const AGENT = "44444444-4444-4444-8444-444444444444";
 // select().from().where() → a thenable of `rows`, as drizzle returns.
@@ -59,5 +59,30 @@ describe("x-slashbin-comment-author", () => {
   it("refuses a malformed value", async () => {
     const err: any = await resolveCommentAuthor(fakeDb([]), req({ ...adminKey }, "Foreman"));
     expect(err?.status).toBe(422);
+  });
+
+  describe("activity actor", () => {
+    const row = { companyId: "company-1", actorType: "user", actorId: "ray", agentId: null, action: "issue.updated" };
+    const inRequest = (commentAuthor: unknown) =>
+      new Promise<any>((done) => nextCredited({ actor: { ...adminKey, commentAuthor } } as any, () => done(creditedActivityActor(row))));
+
+    it("a credited request logs as the credited agent", async () => {
+      expect(await inRequest({ kind: "agent", agentId: AGENT, companyIds: ["company-1"] }))
+        .toEqual({ ...row, actorType: "agent", actorId: AGENT, agentId: AGENT });
+    });
+
+    it("an uncredited request, or one outside any request, logs as the board user", async () => {
+      expect(await inRequest(undefined)).toEqual(row);
+      expect(creditedActivityActor(row)).toEqual(row);
+    });
+
+    it("never moves a row on another company, or one an agent logged", async () => {
+      expect(await inRequest({ kind: "agent", agentId: AGENT, companyIds: ["company-2"] })).toEqual(row);
+      const agentRow = { ...row, actorType: "agent", actorId: "other", agentId: "other" };
+      await new Promise<void>((done) => nextCredited({ actor: { ...adminKey, commentAuthor: { kind: "agent", agentId: AGENT, companyIds: ["company-1"] } } } as any, () => {
+        expect(creditedActivityActor(agentRow)).toEqual(agentRow);
+        done();
+      }));
+    });
   });
 });

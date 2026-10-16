@@ -20,6 +20,7 @@ SERVER_FILES=(
   routes/projects.ts
   services/heartbeat.ts
   services/execution-recovery-resolution.ts
+  services/activity-log.ts
 )
 
 out="${1:?usage: server-overlay.sh <out-dir>}"
