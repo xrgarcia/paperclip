@@ -1,5 +1,7 @@
 import { tenantSessionRecovery } from "@/lib/tenant-session-recovery";
 import { api } from "./client";
+// Slashbin patch (slashbin/PATCHES.md): the feed shows a credited request's author.
+import { withCreditedActor } from "../lib/credited-actor";
 
 /**
  * Agent audit API client.
@@ -92,7 +94,7 @@ export const auditApi = {
     const qs = search.toString();
     return api.get<AuditActionsResponse>(
       `/companies/${companyId}/audit/agent-actions${qs ? `?${qs}` : ""}`,
-    );
+    ).then((page) => ({ ...page, items: page.items.map(withCreditedActor) }));
   },
 
   /**

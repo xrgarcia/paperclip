@@ -24,3 +24,12 @@ describe("credited activity actor", () => {
     expect(withCreditedActor(agentRow)).toBe(agentRow);
   });
 });
+
+describe("credited audit row", () => {
+  it("shows a credited row by its credited agent, and a stripped basic-tier row as saved", () => {
+    const row = { actorType: "user" as const, actorId: "ray", agentId: null, details: { creditedActor: { type: "agent", id: "foreman" } } };
+    expect(withCreditedActor(row)).toMatchObject({ actorType: "agent", actorId: "foreman", agentId: null });
+    const basic = { ...row, details: null };
+    expect(withCreditedActor(basic)).toBe(basic);
+  });
+});
