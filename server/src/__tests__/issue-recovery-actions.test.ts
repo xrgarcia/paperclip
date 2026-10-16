@@ -1880,6 +1880,9 @@ describeEmbeddedPostgres("issue recovery actions", () => {
     await db.insert(authUsers).values({ id: responsibleUserId, name: "Recovery operator", email: `${responsibleUserId}@example.test`,
       emailVerified: true, createdAt: new Date(), updatedAt: new Date() });
     await db.update(companies).set({ defaultResponsibleUserId: responsibleUserId }).where(eq(companies.id, companyId));
+    // Occupy the agent's only dispatch slot: real admission, no provider launch.
+    await db.update(agents).set({ runtimeConfig: { heartbeat: { maxConcurrentRuns: 1 } } }).where(eq(agents.id, coderId));
+    await seedHeartbeatRun({ companyId, agentId: coderId, runId: randomUUID(), status: "running" });
     // The real heartbeat admission: a wake that named the deleted run as its
     // predecessor (retryOfRunId) would fail its foreign key here.
     const heartbeat = heartbeatService(db, { runtimeEnv: {} });
@@ -1932,34 +1935,60 @@ describeEmbeddedPostgres("issue recovery actions", () => {
     expect(valid!.evidence).toMatchObject({ continuationDelivery: "delivered" });
   });
 
-  it("moves earlier adopted-owner reconciliations of a deleted run out of the batch and wakes their assignee", async () => {
+  // The shape revision 54a75c35b left: the assignee adopted as return owner,
+  // pending delivery of a continuation naming the deleted run.
+  async function seedAdoptedOrphan() {
+    const seeded = await seedOrphanedLegacyHold();
+    const responsibleUserId = randomUUID();
+    await db.insert(authUsers).values({ id: responsibleUserId, name: "Recovery operator", email: `${responsibleUserId}@example.test`,
+      emailVerified: true, createdAt: new Date(), updatedAt: new Date() });
+    await db.update(companies).set({ defaultResponsibleUserId: responsibleUserId }).where(eq(companies.id, seeded.companyId));
+    await db.update(issues).set({ status: "todo" }).where(eq(issues.id, seeded.sourceIssueId));
+    await db.update(issueRecoveryActions).set({ outcome: "restored", returnOwnerAgentId: seeded.coderId,
+      evidence: { runId: seeded.reconciliation.runId, continuationDelivery: "pending", executionReconciliation: seeded.reconciliation } })
+      .where(eq(issueRecoveryActions.id, seeded.action.id));
+    return seeded;
+  }
+
+  it("delivers an earlier adopted-owner reconciliation of a deleted run as an admitted ordinary wake", async () => {
+    const { action, coderId, companyId, reconciliation } = await seedAdoptedOrphan();
+    // Occupy the agent's only dispatch slot: real admission, no provider launch.
+    await db.update(agents).set({ runtimeConfig: { heartbeat: { maxConcurrentRuns: 1 } } }).where(eq(agents.id, coderId));
+    await seedHeartbeatRun({ companyId, agentId: coderId, runId: randomUUID(), status: "running" });
+    const heartbeat = heartbeatService(db, { runtimeEnv: {} });
+    await deliverReconciledExecutions(db, heartbeat.wakeup);
+    const [row] = await db.select().from(issueRecoveryActions).where(eq(issueRecoveryActions.id, action.id));
+    expect(row!.evidence).toMatchObject({ continuationDelivery: "assignee_wake", executionReconciliation: { runId: reconciliation.runId } });
+    const [run] = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, String(row!.evidence.continuationRunId)));
+    expect(run).toMatchObject({ agentId: coderId, retryOfRunId: null, status: "queued" });
+  });
+
+  it("retries an unadmitted orphan wake a bounded number of times, then frees the batch", async () => {
     const adopted: { id: string; coderId: string }[] = [];
     for (let i = 0; i < 25; i++) {
-      const { action, reconciliation, sourceIssueId, coderId } = await seedOrphanedLegacyHold();
-      await db.update(issues).set({ status: "todo" }).where(eq(issues.id, sourceIssueId));
-      // The shape the earlier revision left: the assignee adopted as return
-      // owner, pending delivery of a continuation naming the deleted run.
-      await db.update(issueRecoveryActions).set({ outcome: "restored", returnOwnerAgentId: coderId,
-        evidence: { runId: reconciliation.runId, continuationDelivery: "pending", executionReconciliation: reconciliation } })
-        .where(eq(issueRecoveryActions.id, action.id));
+      const { action, coderId } = await seedAdoptedOrphan();
       adopted.push({ id: action.id, coderId });
     }
     const { action, heartbeat } = await seedReconciledDelivery();
-    const woken: string[] = [];
+    const attempts = new Map<string, number>();
     const wake: typeof heartbeat.wakeup = async (agentId, opts) => {
       if (!adopted.some((a) => a.coderId === agentId)) return heartbeat.wakeup(agentId, opts);
-      woken.push(agentId);
-      // The deleted run must never be named as a predecessor.
+      attempts.set(agentId, (attempts.get(agentId) ?? 0) + 1);
+      expect(opts?.idempotencyKey).not.toMatch(/^execution-reconciliation:/);
       expect(opts?.contextSnapshot).not.toHaveProperty("retryOfRunId");
-      expect(opts?.contextSnapshot).not.toHaveProperty("previousRunId");
       return null;
     };
+    for (let sweep = 1; sweep <= 2; sweep++) {
+      await deliverReconciledExecutions(db, wake);
+      const [row] = await db.select().from(issueRecoveryActions).where(eq(issueRecoveryActions.id, adopted[0]!.id));
+      expect(row!.evidence).toMatchObject({ continuationDelivery: "pending", orphanWakeAttempts: sweep });
+    }
     await deliverReconciledExecutions(db, wake);
     await deliverReconciledExecutions(db, wake);
     for (const { id, coderId } of adopted) {
       const [row] = await db.select().from(issueRecoveryActions).where(eq(issueRecoveryActions.id, id));
-      expect(row!.evidence).toMatchObject({ continuationDelivery: "assignee_wake" });
-      expect(woken.filter((a) => a === coderId)).toHaveLength(1);
+      expect(row!.evidence).toMatchObject({ continuationDelivery: "invalidated", orphanWakeAttempts: 3 });
+      expect(attempts.get(coderId)).toBe(3);
     }
     const [valid] = await db.select().from(issueRecoveryActions).where(eq(issueRecoveryActions.id, action.id));
     expect(valid!.evidence).toMatchObject({ continuationDelivery: "delivered" });

@@ -210,6 +210,9 @@ export async function markExecutionReconciliation(
     );
 }
 
+// Slashbin patch (EM#608): sweeps an orphaned reconciliation may stay pending.
+const ORPHAN_WAKE_ATTEMPTS = 3;
+
 export async function deliverReconciledExecutions(
   db: Db,
   wake: ReturnType<typeof import("./heartbeat.js").heartbeatService>["wakeup"],
@@ -280,8 +283,11 @@ export async function deliverReconciledExecutions(
       // predecessor run; once that run is deleted it can never be admitted,
       // and a record retried forever keeps its place in the 25-row batch.
       // Such a record (left by an earlier revision that adopted the assignee
-      // as return owner) leaves pending first, then gets the ordinary
-      // restored wake, as the route now gives a new orphaned hold.
+      // as return owner) gets the ordinary restored wake the route now gives
+      // a new orphaned hold. Its key avoids the execution-reconciliation:
+      // prefix, which heartbeat admits only with the predecessor context.
+      // It stays pending until a run is queued, for at most
+      // ORPHAN_WAKE_ATTEMPTS sweeps, so it cannot hold a batch slot forever.
       const [predecessor] = await db
         .select({ id: heartbeatRuns.id })
         .from(heartbeatRuns)
@@ -292,30 +298,39 @@ export async function deliverReconciledExecutions(
           ),
         );
       if (!predecessor) {
-        const [claimed] = await db
+        let restored: { id: string } | null = null;
+        try {
+          restored = await wake(action.returnOwnerAgentId, {
+            source: "automation",
+            triggerDetail: "system",
+            reason: "issue_recovery_action_restored",
+            idempotencyKey: `orphan-restore:${action.id}`,
+            payload: { issueId: task.id, recoveryActionId: action.id },
+            requestedByActorType: "system",
+            requestedByActorId: "execution-recovery",
+            contextSnapshot: {
+              issueId: task.id,
+              taskId: task.id,
+              wakeReason: "issue_recovery_action_restored",
+              source: "issue.recovery_action_resolution",
+              recoveryActionId: action.id,
+            },
+          });
+        } catch (err) {
+          logger.warn({ err, recoveryActionId: action.id }, "Orphaned reconciliation wake failed");
+        }
+        const attempts = Number(action.evidence.orphanWakeAttempts ?? 0) + 1;
+        const settled = restored
+          ? { continuationDelivery: "assignee_wake", continuationRunId: restored.id }
+          : attempts >= ORPHAN_WAKE_ATTEMPTS
+            ? { continuationDelivery: "invalidated", orphanWakeAttempts: attempts }
+            : { orphanWakeAttempts: attempts };
+        if (!restored && attempts >= ORPHAN_WAKE_ATTEMPTS)
+          logger.warn({ recoveryActionId: action.id, attempts }, "Orphaned reconciliation was never admitted; delivery invalidated");
+        await db
           .update(issueRecoveryActions)
-          .set({
-            evidence: sql`${issueRecoveryActions.evidence} || '{"continuationDelivery":"assignee_wake"}'::jsonb`,
-          })
-          .where(pendingDecision)
-          .returning({ id: issueRecoveryActions.id });
-        if (!claimed) continue;
-        await wake(action.returnOwnerAgentId, {
-          source: "automation",
-          triggerDetail: "system",
-          reason: "issue_recovery_action_restored",
-          idempotencyKey: `execution-reconciliation:${action.id}`,
-          payload: { issueId: task.id, recoveryActionId: action.id },
-          requestedByActorType: "system",
-          requestedByActorId: "execution-recovery",
-          contextSnapshot: {
-            issueId: task.id,
-            taskId: task.id,
-            wakeReason: "issue_recovery_action_restored",
-            source: "issue.recovery_action_resolution",
-            recoveryActionId: action.id,
-          },
-        });
+          .set({ evidence: sql`${issueRecoveryActions.evidence} || ${JSON.stringify(settled)}::jsonb` })
+          .where(pendingDecision);
         continue;
       }
       const run = await wake(action.returnOwnerAgentId, {
