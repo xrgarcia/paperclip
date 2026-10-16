@@ -18,6 +18,8 @@ SERVER_FILES=(
   slashbin/protected-cases.ts
   services/companies.ts
   routes/projects.ts
+  services/heartbeat.ts
+  services/execution-recovery-resolution.ts
 )
 
 out="${1:?usage: server-overlay.sh <out-dir>}"
