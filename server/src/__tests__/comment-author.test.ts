@@ -1,6 +1,6 @@
 // Slashbin patch: resolving x-slashbin-comment-author (middleware/comment-author.ts).
 import { describe, expect, it } from "vitest";
-import { creditedActivityActor, nextCredited, parseCommentAuthor, resolveCommentAuthor } from "../middleware/comment-author.js";
+import { creditedActivityDetails, nextCredited, parseCommentAuthor, resolveCommentAuthor } from "../middleware/comment-author.js";
 
 const AGENT = "44444444-4444-4444-8444-444444444444";
 // select().from().where() → a thenable of `rows`, as drizzle returns.
@@ -61,28 +61,33 @@ describe("x-slashbin-comment-author", () => {
     expect(err?.status).toBe(422);
   });
 
-  describe("activity actor", () => {
-    const row = { companyId: "company-1", actorType: "user", actorId: "ray", agentId: null, action: "issue.updated" };
-    const inRequest = (commentAuthor: unknown) =>
-      new Promise<any>((done) => nextCredited({ actor: { ...adminKey, commentAuthor } } as any, () => done(creditedActivityActor(row))));
+  describe("activity credit", () => {
+    const row = { companyId: "company-1", actorType: "user" };
+    const details = { status: "in_review" };
+    const credit = { kind: "agent", agentId: AGENT, companyIds: ["company-1"] };
+    const inRequest = (commentAuthor: unknown, r: any = row, d: any = details) =>
+      new Promise<any>((done) => nextCredited({ actor: { ...adminKey, commentAuthor } } as any, () => done(creditedActivityDetails(r, d))));
 
-    it("a credited request logs as the credited agent", async () => {
-      expect(await inRequest({ kind: "agent", agentId: AGENT, companyIds: ["company-1"] }))
-        .toEqual({ ...row, actorType: "agent", actorId: AGENT, agentId: AGENT });
+    it("a credited request's row carries the credited author in its details only", async () => {
+      expect(await inRequest(credit)).toEqual({ ...details, creditedActor: { type: "agent", id: AGENT } });
+      expect(await inRequest({ kind: "user", userId: "u2", companyIds: ["company-1"] }, row, null))
+        .toEqual({ creditedActor: { type: "user", id: "u2" } });
     });
 
-    it("an uncredited request, or one outside any request, logs as the board user", async () => {
-      expect(await inRequest(undefined)).toEqual(row);
-      expect(creditedActivityActor(row)).toEqual(row);
+    it("an uncredited request, or one outside any request, saves its details unchanged", async () => {
+      expect(await inRequest(undefined)).toBe(details);
+      expect(creditedActivityDetails(row, details)).toBe(details);
     });
 
-    it("never moves a row on another company, or one an agent logged", async () => {
-      expect(await inRequest({ kind: "agent", agentId: AGENT, companyIds: ["company-2"] })).toEqual(row);
-      const agentRow = { ...row, actorType: "agent", actorId: "other", agentId: "other" };
-      await new Promise<void>((done) => nextCredited({ actor: { ...adminKey, commentAuthor: { kind: "agent", agentId: AGENT, companyIds: ["company-1"] } } } as any, () => {
-        expect(creditedActivityActor(agentRow)).toEqual(agentRow);
-        done();
-      }));
+    it("never credits another company's row, or one an agent logged", async () => {
+      expect(await inRequest({ ...credit, companyIds: ["company-2"] })).toBe(details);
+      expect(await inRequest(credit, { ...row, actorType: "agent" })).toBe(details);
+    });
+
+    it("drops a creditedActor the route's details carry", async () => {
+      const forged = { ...details, creditedActor: { type: "agent", id: "someone" } };
+      expect(await inRequest(undefined, row, forged)).toEqual(details);
+      expect(await inRequest(credit, row, forged)).toEqual({ ...details, creditedActor: { type: "agent", id: AGENT } });
     });
   });
 });

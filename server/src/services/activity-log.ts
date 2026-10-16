@@ -10,8 +10,8 @@ import { sanitizeRecord } from "../redaction.js";
 import { logger } from "../middleware/logger.js";
 import type { PluginEventBus } from "./plugin-event-bus.js";
 import { instanceSettingsService } from "./instance-settings.js";
-// Slashbin patch (slashbin/PATCHES.md): a credited board-key request logs as its credited author.
-import { creditedActivityActor } from "../middleware/comment-author.js";
+// Slashbin patch (slashbin/PATCHES.md): a credited board-key request's rows carry its credited author.
+import { creditedActivityDetails } from "../middleware/comment-author.js";
 
 const PLUGIN_EVENT_SET: ReadonlySet<string> = new Set(PLUGIN_EVENT_TYPES);
 const ACTIVITY_ACTION_TO_PLUGIN_EVENT: Readonly<Record<string, PluginEventType>> = {
@@ -159,10 +159,9 @@ export function publishActivity(publication: ActivityPublication) {
   if (publication.pluginEvent) publishPluginDomainEvent(publication.pluginEvent);
 }
 
-export async function persistActivity(db: Db, logged: LogActivityInput) {
-  const redactedDetails = await redactActivityDetails(db, logged.details ?? null);
-  const responsibleUserId = await resolveResponsibleUserIdForActivity(db, logged);
-  const input = creditedActivityActor(logged);
+export async function persistActivity(db: Db, input: LogActivityInput) {
+  const redactedDetails = creditedActivityDetails(input, await redactActivityDetails(db, input.details ?? null));
+  const responsibleUserId = await resolveResponsibleUserIdForActivity(db, input);
   const [activity] = await db.insert(activityLog).values({
     companyId: input.companyId,
     actorType: input.actorType,

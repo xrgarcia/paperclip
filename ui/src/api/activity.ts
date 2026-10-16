@@ -1,5 +1,7 @@
 import type { ActivityEvent, ExecutionProjection, RunLivenessState } from "@paperclipai/shared";
 import { api, type RequestOptions } from "./client";
+// Slashbin patch (slashbin/PATCHES.md): the feed shows a credited request's author.
+import { withCreditedActor } from "../lib/credited-actor";
 
 export type { RunLivenessState } from "@paperclipai/shared";
 
@@ -74,9 +76,11 @@ export const activityApi = {
     if (filters?.agentId) params.set("agentId", filters.agentId);
     if (filters?.limit) params.set("limit", String(filters.limit));
     const qs = params.toString();
-    return api.get<ActivityEvent[]>(`/companies/${companyId}/activity${qs ? `?${qs}` : ""}`, options);
+    return api.get<ActivityEvent[]>(`/companies/${companyId}/activity${qs ? `?${qs}` : ""}`, options)
+      .then((events) => events.map(withCreditedActor));
   },
-  forIssue: (issueId: string) => api.get<ActivityEvent[]>(`/issues/${issueId}/activity`),
+  forIssue: (issueId: string) =>
+    api.get<ActivityEvent[]>(`/issues/${issueId}/activity`).then((events) => events.map(withCreditedActor)),
   runsForIssue: (issueId: string) => api.get<RunForIssue[]>(`/issues/${issueId}/runs`),
   issuesForRun: (runId: string) => api.get<IssueForRun[]>(`/heartbeat-runs/${runId}/issues`),
 };

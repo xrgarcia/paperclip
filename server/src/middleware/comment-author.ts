@@ -6,9 +6,9 @@
 //
 // For a sync that copies what someone said elsewhere (GitHub) onto a card: the
 // comment shows who said it, not whose key carried it, and the activity feed shows
-// who acted. Only the comment's author and the activity row's actor change: the
-// request still acts as the board user, so authorization, the activity row's
-// responsible user and every status, review and reopen rule see the real caller, and an
+// who acted. Only the comment's author changes, and the activity row gains a display
+// credit in its details: the request still acts as the board user, so authorization,
+// the activity row's actor and every status, review and reopen rule see the real caller, and an
 // admin board key can already write anything an agent can. The header is refused
 // on any other caller, and an author that is not on the issue's company is a 422,
 // so a write is never silently credited to the key's own user.
@@ -119,17 +119,28 @@ export function nextCredited(req: Request, next: NextFunction): void {
   else next();
 }
 
-type ActivityActor = { companyId: string; actorType: string; actorId: string; agentId?: string | null };
+type ActivityRow = { companyId: string; actorType: string };
 
 /**
- * An activity row logged by a credited request, as the credited author: the feed shows
- * who acted, not whose key carried it. Only a row the route logs as the board user
- * moves, and only on the credited author's company; anything else is unchanged.
+ * The details an activity row is saved with, plus `creditedActor` when a credited
+ * request logs it as the board user: the feed displays that author (ui
+ * lib/credited-actor.ts). The row's actor, agent and responsible user stay the board
+ * user, so the review, confirmation and cleanup rules that read them are unchanged.
+ * A caller-supplied `creditedActor` is always dropped, so only this request's header sets it.
  */
-export function creditedActivityActor<T extends ActivityActor>(input: T): T {
+export function creditedActivityDetails(
+  row: ActivityRow,
+  details: Record<string, unknown> | null,
+): Record<string, unknown> | null {
+  let own = details;
+  if (own && "creditedActor" in own) {
+    const { creditedActor: _dropped, ...rest } = own;
+    own = rest;
+  }
   const credited = creditedRequest.getStore();
-  if (!credited || input.actorType !== "user" || !credited.companyIds.includes(input.companyId)) return input;
-  return credited.kind === "agent"
-    ? ({ ...input, actorType: "agent", actorId: credited.agentId, agentId: credited.agentId } as T)
-    : ({ ...input, actorId: credited.userId } as T);
+  if (!credited || row.actorType !== "user" || !credited.companyIds.includes(row.companyId)) return own;
+  const creditedActor = credited.kind === "agent"
+    ? { type: "agent", id: credited.agentId }
+    : { type: "user", id: credited.userId };
+  return { ...(own ?? {}), creditedActor };
 }
