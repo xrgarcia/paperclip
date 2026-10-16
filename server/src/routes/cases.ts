@@ -50,6 +50,18 @@ import { instanceSettingsService } from "../services/instance-settings.js";
 import { documentAnnotationService, logActivity } from "../services/index.js";
 import type { StorageService } from "../storage/types.js";
 import { assertCompanyAccess, getActorInfo, hasCompanyAccess } from "./authz.js";
+import { logger } from "../middleware/logger.js";
+import {
+  PROTECTED_CASES_ENV,
+  assertAttachmentAllowed,
+  assertCaseProtectionAvailable,
+  assertCaseWritable,
+  assertChangeSummary,
+  assertDocumentDeletable,
+  assertRestoreBase,
+  isProtectedCase,
+  parseCaseProtection,
+} from "../slashbin/protected-cases.js";
 
 type CaseRouteDb = Db | Parameters<Parameters<Db["transaction"]>[0]>[0];
 type CaseActor = ReturnType<typeof getActorInfo>;
@@ -548,6 +560,44 @@ function singleFileUpload(req: Request, res: Response, maxBytes: number) {
 
 export function caseRoutes(db: Db, storage: StorageService) {
   const router = Router();
+  // Slashbin patch (EM#629): protected Cases. Read once at boot; an invalid value
+  // refuses every Case write until the env is fixed and the server restarts.
+  const caseProtection = parseCaseProtection(process.env[PROTECTED_CASES_ENV]);
+  if (caseProtection.status === "invalid") {
+    logger.error({ error: caseProtection.error }, "case protection config invalid; all case writes refused");
+  }
+  // Every case detail reply says whether it is protected, so the Case page asks
+  // for a changeSummary on saves.
+  async function caseDetailResponse(row: typeof cases.$inferSelect) {
+    return { ...(await loadCaseDetail(db, row)), protected: isProtectedCase(caseProtection, row) };
+  }
+
+  // Filing a case under a protected parent adds to the policy container.
+  async function assertParentCaseWritable(tx: CaseRouteDb, req: Request, companyId: string, parentCaseId: string | null) {
+    if (!parentCaseId) return;
+    const parent = await tx
+      .select({ id: cases.id, caseType: cases.caseType })
+      .from(cases)
+      .where(and(eq(cases.id, parentCaseId), eq(cases.companyId, companyId)))
+      .limit(1)
+      .then((rows) => rows[0] ?? null);
+    if (parent) assertCaseWritable(caseProtection, req, parent);
+  }
+
+  // Taking a case out from under a protected parent removes from the policy
+  // container, so it needs that parent's editor too — not only the destination's.
+  async function assertParentChangeAllowed(
+    tx: CaseRouteDb,
+    req: Request,
+    companyId: string,
+    currentParentId: string | null,
+    nextParentId: string | null,
+  ) {
+    if (currentParentId && currentParentId !== nextParentId) {
+      await assertParentCaseWritable(tx, req, companyId, currentParentId);
+    }
+    await assertParentCaseWritable(tx, req, companyId, nextParentId);
+  }
   const documentAnnotationsSvc = documentAnnotationService(db);
 
   async function logCaseAnnotationRemaps(input: {
@@ -596,9 +646,11 @@ export function caseRoutes(db: Db, storage: StorageService) {
     const actor = getActorInfo(req);
     const body = req.body as z.infer<typeof createCaseSchema>;
 
+    assertCaseProtectionAvailable(caseProtection);
     const result = await db.transaction(async (tx) => {
       await assertProjectBelongsToCompany(tx, { companyId, projectId: body.projectId ?? null });
       await assertParentCaseBelongsToCompany(tx, { companyId, parentCaseId: body.parentCaseId ?? null });
+      await assertParentCaseWritable(tx, req, companyId, body.parentCaseId ?? null);
       await lockCaseUpsertKey(tx, { companyId, caseType: body.caseType, key: body.key });
       const keyFilter = body.key ? eq(cases.key, body.key) : isNull(cases.key);
 
@@ -610,7 +662,11 @@ export function caseRoutes(db: Db, storage: StorageService) {
         .limit(1)
         .then((rows) => rows[0] ?? null);
 
+      // An upsert overwrites an existing row; a new row of a protected type is a
+      // new policy container. Both need the editor check.
+      assertCaseWritable(caseProtection, req, existing ?? { id: "", caseType: body.caseType });
       if (existing) {
+        await assertParentChangeAllowed(tx, req, companyId, existing.parentCaseId, body.parentCaseId ?? existing.parentCaseId);
         const status = body.status ?? existing.status;
         const [updated] = await tx.update(cases).set({
           projectId: body.projectId ?? existing.projectId,
@@ -663,7 +719,7 @@ export function caseRoutes(db: Db, storage: StorageService) {
       return { created: true, row: created! };
     });
 
-    res.status(result.created ? 201 : 200).json(await loadCaseDetail(db, result.row));
+    res.status(result.created ? 201 : 200).json(await caseDetailResponse(result.row));
   });
 
   router.get("/companies/:companyId/cases", async (req, res) => {
@@ -771,6 +827,8 @@ export function caseRoutes(db: Db, storage: StorageService) {
     async (req, res, next) => {
       const caseRow = await resolveSharedPathCase(db, req, req.params.id as string);
       if (!caseRow) return next();
+      // Annotation threads stay open on protected cases: they are how readers propose.
+      assertCaseProtectionAvailable(caseProtection);
       const key = parseDocumentKey(req.params.key as string);
       const { actor, annotationActor } = annotationActorInput(req);
       const thread = await documentAnnotationsSvc.createCaseThread(
@@ -810,6 +868,8 @@ export function caseRoutes(db: Db, storage: StorageService) {
     async (req, res, next) => {
       const caseRow = await resolveSharedPathCase(db, req, req.params.id as string);
       if (!caseRow) return next();
+      // Annotation threads stay open on protected cases: they are how readers propose.
+      assertCaseProtectionAvailable(caseProtection);
       const key = parseDocumentKey(req.params.key as string);
       const { actor, annotationActor } = annotationActorInput(req);
       const comment = await documentAnnotationsSvc.addCaseComment(
@@ -847,6 +907,8 @@ export function caseRoutes(db: Db, storage: StorageService) {
     async (req, res, next) => {
       const caseRow = await resolveSharedPathCase(db, req, req.params.id as string);
       if (!caseRow) return next();
+      // Annotation threads stay open on protected cases: they are how readers propose.
+      assertCaseProtectionAvailable(caseProtection);
       const key = parseDocumentKey(req.params.key as string);
       const { actor, annotationActor } = annotationActorInput(req);
       const thread = await documentAnnotationsSvc.updateCaseThread(
@@ -886,6 +948,8 @@ export function caseRoutes(db: Db, storage: StorageService) {
     const key = parseDocumentKey(req.params.key as string);
     const actor = getActorInfo(req);
     const body = upsertCaseDocumentSchema.parse(req.body);
+    assertCaseWritable(caseProtection, req, caseRow);
+    assertChangeSummary(caseProtection, caseRow, body.changeSummary);
 
     const result = await db.transaction(async (tx) => {
       await lockCaseDocumentKey(tx, { companyId: caseRow.companyId, caseId: caseRow.id, key });
@@ -999,15 +1063,20 @@ export function caseRoutes(db: Db, storage: StorageService) {
       });
       await autoLinkRunIssue(tx, { companyId: caseRow.companyId, caseId: caseRow.id, actor, role: "work" });
       return {
-        document: {
-          ...document!,
-          title: body.title ?? document!.title,
-          format: body.format,
-          latestBody: body.body,
-          latestRevisionId: revision!.id,
-          latestRevisionNumber: revision!.revisionNumber,
-          updatedAt: now,
-        },
+        // Slashbin (EM#629): carry `key` like restore does — the Case page keys its
+        // document cache on it and crashes on an undefined one after a save.
+        document: caseDocumentResponse({
+          key,
+          document: {
+            ...document!,
+            title: body.title ?? document!.title,
+            format: body.format,
+            latestBody: body.body,
+            latestRevisionId: revision!.id,
+            latestRevisionNumber: revision!.revisionNumber,
+            updatedAt: now,
+          },
+        }),
         revision,
       };
     });
@@ -1024,6 +1093,7 @@ export function caseRoutes(db: Db, storage: StorageService) {
   router.post("/cases/:id/documents/:key/lock", async (req, res, next) => {
     const caseRow = await resolveSharedPathCase(db, req, req.params.id as string);
     if (!caseRow) return next();
+    assertCaseWritable(caseProtection, req, caseRow);
     const key = parseDocumentKey(req.params.key as string);
     const actor = getActorInfo(req);
     const result = await db.transaction(async (tx) => {
@@ -1047,6 +1117,7 @@ export function caseRoutes(db: Db, storage: StorageService) {
   router.post("/cases/:id/documents/:key/unlock", async (req, res, next) => {
     const caseRow = await resolveSharedPathCase(db, req, req.params.id as string);
     if (!caseRow) return next();
+    assertCaseWritable(caseProtection, req, caseRow);
     const key = parseDocumentKey(req.params.key as string);
     const result = await db.transaction(async (tx) => {
       await lockCaseDocumentKey(tx, { companyId: caseRow.companyId, caseId: caseRow.id, key });
@@ -1072,6 +1143,8 @@ export function caseRoutes(db: Db, storage: StorageService) {
     const key = parseDocumentKey(req.params.key as string);
     const revisionId = req.params.revisionId as string;
     const actor = getActorInfo(req);
+    assertCaseWritable(caseProtection, req, caseRow);
+    const baseRevisionId = (req.body as { baseRevisionId?: unknown } | undefined)?.baseRevisionId;
 
     const result = await db.transaction(async (tx) => {
       await lockCaseDocumentKey(tx, { companyId: caseRow.companyId, caseId: caseRow.id, key });
@@ -1084,6 +1157,7 @@ export function caseRoutes(db: Db, storage: StorageService) {
           lockedAt: existing.document.lockedAt,
         });
       }
+      assertRestoreBase(caseProtection, caseRow, baseRevisionId, existing.document);
       const sourceRevision = await tx
         .select()
         .from(documentRevisions)
@@ -1158,6 +1232,7 @@ export function caseRoutes(db: Db, storage: StorageService) {
   router.delete("/cases/:id/documents/:key", async (req, res, next) => {
     const caseRow = await resolveSharedPathCase(db, req, req.params.id as string);
     if (!caseRow) return next();
+    assertDocumentDeletable(caseProtection, caseRow);
     const key = parseDocumentKey(req.params.key as string);
     await db.transaction(async (tx) => {
       await lockCaseDocumentKey(tx, { companyId: caseRow.companyId, caseId: caseRow.id, key });
@@ -1179,6 +1254,7 @@ export function caseRoutes(db: Db, storage: StorageService) {
   router.post("/cases/:id/links", validate(createIssueLinkSchema), async (req, res) => {
     await assertCasesEnabled(db);
     const caseRow = await assertCaseAccess(db, req, req.params.id as string);
+    assertCaseWritable(caseProtection, req, caseRow);
     const actor = getActorInfo(req);
     const body = req.body as z.infer<typeof createIssueLinkSchema>;
 
@@ -1224,6 +1300,8 @@ export function caseRoutes(db: Db, storage: StorageService) {
   router.post("/cases/:id/attachments", async (req, res) => {
     await assertCasesEnabled(db);
     const caseRow = await assertCaseAccess(db, req, req.params.id as string);
+    assertCaseWritable(caseProtection, req, caseRow);
+    assertAttachmentAllowed(caseProtection, caseRow);
     const actor = getActorInfo(req);
 
     try {
@@ -1395,7 +1473,7 @@ export function caseRoutes(db: Db, storage: StorageService) {
   router.get("/cases/:id", async (req, res, next) => {
     const row = await resolveSharedPathCase(db, req, req.params.id as string);
     if (!row) return next();
-    res.json(await loadCaseDetail(db, row));
+    res.json(await caseDetailResponse(row));
   });
 
   router.patch("/cases/:id", async (req, res, next) => {
@@ -1404,6 +1482,7 @@ export function caseRoutes(db: Db, storage: StorageService) {
     const actor = getActorInfo(req);
     const body = patchCaseSchema.parse(req.body);
     const nextLabelIds = body.labelIds ?? body.labels;
+    assertCaseWritable(caseProtection, req, caseRow);
 
     const updated = await db.transaction(async (tx) => {
       await assertProjectBelongsToCompany(tx, { companyId: caseRow.companyId, projectId: body.projectId ?? null });
@@ -1412,6 +1491,9 @@ export function caseRoutes(db: Db, storage: StorageService) {
         caseId: caseRow.id,
         parentCaseId: body.parentCaseId ?? null,
       });
+      if (Object.hasOwn(body, "parentCaseId")) {
+        await assertParentChangeAllowed(tx, req, caseRow.companyId, caseRow.parentCaseId, body.parentCaseId ?? null);
+      }
       if (nextLabelIds) await assertLabelsBelongToCompany(tx, caseRow.companyId, nextLabelIds);
 
       const now = new Date();
@@ -1480,7 +1562,7 @@ export function caseRoutes(db: Db, storage: StorageService) {
       await autoLinkRunIssue(tx, { companyId: caseRow.companyId, caseId: caseRow.id, actor, role: "work" });
       return row!;
     });
-    res.json(await loadCaseDetail(db, updated));
+    res.json(await caseDetailResponse(updated));
   });
 
   return router;

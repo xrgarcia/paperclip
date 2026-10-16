@@ -33,6 +33,7 @@ import {
   routineTriggers,
   routineRevisions,
   routines,
+  caseAttachments,
 } from "@paperclipai/db";
 import { notFound, unprocessable } from "../errors.js";
 import { isCloudManagedInstance } from "./cloud-instance.js";
@@ -428,7 +429,16 @@ export function companyService(db: Db) {
         }
 
         if (logoAssetId !== undefined && existing.logoAssetId && existing.logoAssetId !== logoAssetId) {
-          await tx.delete(assets).where(eq(assets.id, existing.logoAssetId));
+          // Slashbin (EM#629): any same-company asset can be made the logo, a Case
+          // attachment's included, and deleting it here cascades to the attachment
+          // row with no Case write and no Case gate. Keep an asset a Case still holds.
+          const heldByCase = await tx
+            .select({ id: caseAttachments.id })
+            .from(caseAttachments)
+            .where(eq(caseAttachments.assetId, existing.logoAssetId))
+            .limit(1)
+            .then((rows) => rows.length > 0);
+          if (!heldByCase) await tx.delete(assets).where(eq(assets.id, existing.logoAssetId));
         }
 
         const [hydrated] = await hydrateCompanySpend([{

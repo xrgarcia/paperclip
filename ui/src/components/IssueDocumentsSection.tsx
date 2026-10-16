@@ -72,7 +72,7 @@ type DocumentSubjectConfig = {
     baseRevisionId: string | null;
   }) => Promise<IssueDocument>;
   deleteDocument?: (key: string) => Promise<unknown>;
-  restoreDocumentRevision?: (key: string, revisionId: string) => Promise<IssueDocument>;
+  restoreDocumentRevision?: (key: string, revisionId: string, baseRevisionId: string | null) => Promise<IssueDocument>;
   setDocumentLock?: (key: string, locked: boolean) => Promise<IssueDocument>;
   syncDetailCache?: (queryClient: QueryClient, document: IssueDocument) => void;
   hideSystemDocuments?: boolean;
@@ -400,9 +400,9 @@ export function IssueDocumentsSection({
   });
 
   const restoreDocumentRevision = useMutation({
-    mutationFn: ({ key, revisionId }: { key: string; revisionId: string }) =>
+    mutationFn: ({ key, revisionId, baseRevisionId }: { key: string; revisionId: string; baseRevisionId: string | null }) =>
       documentSubject.restoreDocumentRevision
-        ? documentSubject.restoreDocumentRevision(key, revisionId)
+        ? documentSubject.restoreDocumentRevision(key, revisionId, baseRevisionId)
         : Promise.reject(new Error("Document revision restore is not available")),
     onSuccess: (document, variables) => {
       syncDocumentCaches(document);
@@ -1186,6 +1186,7 @@ export function IssueDocumentsSection({
                               onClick={() => restoreDocumentRevision.mutate({
                                 key: doc.key,
                                 revisionId: selectedHistoricalRevision.id,
+                                baseRevisionId: doc.latestRevisionId,
                               })}
                               disabled={restoreDocumentRevision.isPending}
                             >

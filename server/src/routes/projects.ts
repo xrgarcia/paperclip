@@ -23,6 +23,7 @@ import { trackProjectCreated } from "@paperclipai/shared/telemetry";
 import { validate } from "../middleware/validate.js";
 import { accessService, projectService, logActivity, workspaceOperationService } from "../services/index.js";
 import { conflict, forbidden, unprocessable } from "../errors.js";
+import { assertDeleteKeepsProtectedCases, loadCaseProtection } from "../slashbin/protected-cases.js";
 import { externalObjectService } from "../services/external-objects.js";
 import { instanceSettingsService } from "../services/instance-settings.js";
 import { assertBoard, assertCompanyAccess, getAccessibleResource, getActorInfo } from "./authz.js";
@@ -51,6 +52,8 @@ const SHARED_WORKSPACE_STOP_AND_RESTART_ACTIONS = new Set(["stop", "restart"]);
 export function projectRoutes(db: Db) {
   const router = Router();
   const svc = projectService(db);
+  // Slashbin (EM#629): deleting a project that holds a protected Case needs its editor.
+  const caseProtection = loadCaseProtection();
 
   async function repositoryViewer(req: Request) {
     if (req.actor.type === "board") return { userId: req.actor.userId ?? null, localTrusted: req.actor.source === "local_implicit" };
@@ -776,6 +779,7 @@ export function projectRoutes(db: Db) {
     const id = req.params.id as string;
     const existing = await getAccessibleResource(req, res, svc.getById(id), "Project not found");
     if (!existing) return;
+    await assertDeleteKeepsProtectedCases(db, caseProtection, req, { projectId: id });
     const project = await svc.remove(id);
     if (!project) {
       res.status(404).json({ error: "Project not found" });
