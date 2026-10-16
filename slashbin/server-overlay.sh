@@ -15,6 +15,7 @@ SERVER_FILES=(
   routes/issues.ts
   routes/cases.ts
   slashbin/protected-cases.ts
+  services/companies.ts
 )
 
 out="${1:?usage: server-overlay.sh <out-dir>}"

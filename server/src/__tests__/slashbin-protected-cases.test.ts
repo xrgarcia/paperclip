@@ -15,6 +15,7 @@ import {
   caseLabels,
   cases,
   companies,
+  companyLogos,
   createDb,
   documentAnnotationComments,
   documentAnnotationThreads,
@@ -32,6 +33,7 @@ import {
 } from "./helpers/embedded-postgres.js";
 import { errorHandler } from "../middleware/error-handler.js";
 import { caseRoutes } from "../routes/cases.js";
+import { companyService } from "../services/companies.js";
 import { instanceSettingsService } from "../services/instance-settings.js";
 import { PROTECTED_CASES_ENV, parseCaseProtection } from "../slashbin/protected-cases.js";
 import type { StorageService } from "../storage/types.js";
@@ -108,6 +110,7 @@ describeEmbeddedPostgres("protected cases routes", () => {
     await db.delete(cases);
     await db.delete(documentRevisions);
     await db.delete(documents);
+    await db.delete(companyLogos);
     await db.delete(assets);
     await db.delete(labels);
     await db.delete(issues);
@@ -326,6 +329,45 @@ describeEmbeddedPostgres("protected cases routes", () => {
     const revisions = await app(s.actors.reader, s.config).get(`/api/cases/${s.policy.id}/documents/body/revisions`).expect(200);
     const list = Array.isArray(revisions.body) ? revisions.body : revisions.body.revisions;
     expect(list).toHaveLength(4);
+  });
+
+  it("keeps a protected Case's attachment when its asset is swapped out as the company logo", async () => {
+    const s = await seed();
+    const mkAsset = async (name: string) => (await db.insert(assets).values({
+      companyId: s.policy.companyId, provider: "local_disk", objectKey: `case/${name}`,
+      contentType: "image/png", byteSize: 1, sha256: name,
+    }).returning())[0]!;
+    // An attachment that predates protection: the route no longer takes new ones.
+    const held = await mkAsset("held");
+    await db.insert(caseAttachments).values({ companyId: s.policy.companyId, caseId: s.policy.id, assetId: held.id });
+    const companiesSvc = companyService(db);
+    for (const next of [await mkAsset("replacement"), null]) {
+      await companiesSvc.update(s.policy.companyId, { logoAssetId: held.id });
+      await companiesSvc.update(s.policy.companyId, { logoAssetId: next?.id ?? null });
+      expect(await db.select().from(assets).where(eq(assets.id, held.id))).toHaveLength(1);
+      expect(await db.select().from(caseAttachments).where(eq(caseAttachments.assetId, held.id))).toHaveLength(1);
+    }
+  });
+
+  it("needs the protected parent's editor to take a child out from under it", async () => {
+    const s = await seed();
+    const editor = app(s.actors.raySession, s.config);
+    const child = await editor.post(`/api/companies/${s.policy.companyId}/cases`)
+      .send({ caseType: "bug", key: "child", title: "Child", parentCaseId: s.policy.id })
+      .expect(201);
+    const childId = child.body.id as string;
+    const intruder = app(s.actors.rayBoardKey, s.config);
+    await intruder.patch(`/api/cases/${childId}`).send({ parentCaseId: null }).expect(403);
+    await intruder.patch(`/api/cases/${childId}`).send({ parentCaseId: s.plain.id }).expect(403);
+    await intruder.post(`/api/companies/${s.policy.companyId}/cases`)
+      .send({ caseType: "bug", key: "child", title: "Child", parentCaseId: s.plain.id })
+      .expect(403);
+    const [row] = await db.select().from(cases).where(eq(cases.id, childId));
+    expect(row!.parentCaseId).toBe(s.policy.id);
+    // Edits that leave the parent alone stay open on the ordinary child.
+    await intruder.patch(`/api/cases/${childId}`).send({ summary: "still mine" }).expect(200);
+    // The editor can move it out.
+    await editor.patch(`/api/cases/${childId}`).send({ parentCaseId: null }).expect(200);
   });
 
   it("tells the Case page which Cases are protected", async () => {

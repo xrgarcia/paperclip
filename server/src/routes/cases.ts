@@ -583,6 +583,21 @@ export function caseRoutes(db: Db, storage: StorageService) {
       .then((rows) => rows[0] ?? null);
     if (parent) assertCaseWritable(caseProtection, req, parent);
   }
+
+  // Taking a case out from under a protected parent removes from the policy
+  // container, so it needs that parent's editor too — not only the destination's.
+  async function assertParentChangeAllowed(
+    tx: CaseRouteDb,
+    req: Request,
+    companyId: string,
+    currentParentId: string | null,
+    nextParentId: string | null,
+  ) {
+    if (currentParentId && currentParentId !== nextParentId) {
+      await assertParentCaseWritable(tx, req, companyId, currentParentId);
+    }
+    await assertParentCaseWritable(tx, req, companyId, nextParentId);
+  }
   const documentAnnotationsSvc = documentAnnotationService(db);
 
   async function logCaseAnnotationRemaps(input: {
@@ -651,6 +666,7 @@ export function caseRoutes(db: Db, storage: StorageService) {
       // new policy container. Both need the editor check.
       assertCaseWritable(caseProtection, req, existing ?? { id: "", caseType: body.caseType });
       if (existing) {
+        await assertParentChangeAllowed(tx, req, companyId, existing.parentCaseId, body.parentCaseId ?? existing.parentCaseId);
         const status = body.status ?? existing.status;
         const [updated] = await tx.update(cases).set({
           projectId: body.projectId ?? existing.projectId,
@@ -1475,7 +1491,9 @@ export function caseRoutes(db: Db, storage: StorageService) {
         caseId: caseRow.id,
         parentCaseId: body.parentCaseId ?? null,
       });
-      await assertParentCaseWritable(tx, req, caseRow.companyId, body.parentCaseId ?? null);
+      if (Object.hasOwn(body, "parentCaseId")) {
+        await assertParentChangeAllowed(tx, req, caseRow.companyId, caseRow.parentCaseId, body.parentCaseId ?? null);
+      }
       if (nextLabelIds) await assertLabelsBelongToCompany(tx, caseRow.companyId, nextLabelIds);
 
       const now = new Date();
