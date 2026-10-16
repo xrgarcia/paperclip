@@ -14,6 +14,8 @@ SERVER_FILES=(
   middleware/comment-author.ts
   middleware/comment-only-key.ts
   routes/issues.ts
+  services/heartbeat.ts
+  services/execution-recovery-resolution.ts
 )
 
 out="${1:?usage: server-overlay.sh <out-dir>}"

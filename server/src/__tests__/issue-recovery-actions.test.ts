@@ -33,6 +33,7 @@ import { errorHandler } from "../middleware/index.js";
 import { issueRoutes } from "../routes/issues.js";
 import { buildPaperclipWakePayload, heartbeatService } from "../services/heartbeat.js";
 import { deliverReconciledExecutions } from "../services/execution-recovery-resolution.js";
+import { buildExecutionContinuation } from "../services/execution-continuation.js";
 import { workspaceOperationService, isNativeWorkspaceFinalizationOperationActive } from "../services/workspace-operations.js";
 import { issueRecoveryActionService } from "../services/issue-recovery-actions.js";
 import { recoveryService } from "../services/recovery/service.js";
@@ -1892,6 +1893,13 @@ describeEmbeddedPostgres("issue recovery actions", () => {
     expect(delivered!.evidence).toMatchObject({ continuationDelivery: "delivered", continuationRunId: wakes[0]!.runId });
     const [continuation] = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, wakes[0]!.runId!));
     expect(continuation!.retryOfRunId).toBeNull();
+    // The deleted run is provenance only: dispatch must not need it to resume.
+    const context = continuation!.contextSnapshot as Record<string, unknown>;
+    expect(context).not.toHaveProperty("previousRunId");
+    expect(context).not.toHaveProperty("retryOfRunId");
+    expect(context.orphanedSourceRunId).toBe(reconciliation.runId);
+    await expect(buildExecutionContinuation({ db, companyId, issueId: sourceIssueId, agentId: coderId,
+      context, runId: continuation!.id, summary: null, exposeLowTrustRaw: false })).resolves.toBeTruthy();
   });
 
   it("still refuses an orphaned-hold reconciliation that names another run", async () => {
