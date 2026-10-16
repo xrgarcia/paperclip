@@ -210,13 +210,29 @@ export async function markExecutionReconciliation(
     );
 }
 
-// Slashbin patch (EM#608): sweeps an orphaned reconciliation may stay pending.
-const ORPHAN_WAKE_ATTEMPTS = 3;
-
 export async function deliverReconciledExecutions(
   db: Db,
   wake: ReturnType<typeof import("./heartbeat.js").heartbeatService>["wakeup"],
 ) {
+  // Slashbin patch (EM#608): a record that stays pending after its turn is
+  // stamped deliveryAttemptedAt and goes behind every record not yet tried,
+  // so 25 undeliverable records cannot hold the batch, and none is dropped.
+  const markAttempted = (action: typeof issueRecoveryActions.$inferSelect) =>
+    db
+      .update(issueRecoveryActions)
+      .set({
+        evidence: sql`${issueRecoveryActions.evidence} || ${JSON.stringify({
+          deliveryAttemptedAt: new Date().toISOString(),
+        })}::jsonb`,
+      })
+      .where(
+        and(
+          eq(issueRecoveryActions.companyId, action.companyId),
+          eq(issueRecoveryActions.id, action.id),
+          eq(issueRecoveryActions.status, "resolved"),
+          sql`${issueRecoveryActions.evidence}->>'continuationDelivery' = 'pending'`,
+        ),
+      );
   const pending = await db
     .select()
     .from(issueRecoveryActions)
@@ -226,6 +242,7 @@ export async function deliverReconciledExecutions(
         sql`${issueRecoveryActions.evidence}->>'continuationDelivery' = 'pending'`,
       ),
     )
+    .orderBy(sql`${issueRecoveryActions.evidence}->>'deliveryAttemptedAt' asc nulls first`)
     .limit(25);
   for (const action of pending) {
     try {
@@ -286,8 +303,8 @@ export async function deliverReconciledExecutions(
       // as return owner) gets the ordinary restored wake the route now gives
       // a new orphaned hold. Its key avoids the execution-reconciliation:
       // prefix, which heartbeat admits only with the predecessor context.
-      // It stays pending until a run is queued, for at most
-      // ORPHAN_WAKE_ATTEMPTS sweeps, so it cannot hold a batch slot forever.
+      // It stays pending until a run is queued; a skipped wake only moves it
+      // to the back of the batch order.
       const [predecessor] = await db
         .select({ id: heartbeatRuns.id })
         .from(heartbeatRuns)
@@ -319,17 +336,18 @@ export async function deliverReconciledExecutions(
         } catch (err) {
           logger.warn({ err, recoveryActionId: action.id }, "Orphaned reconciliation wake failed");
         }
-        const attempts = Number(action.evidence.orphanWakeAttempts ?? 0) + 1;
-        const settled = restored
-          ? { continuationDelivery: "assignee_wake", continuationRunId: restored.id }
-          : attempts >= ORPHAN_WAKE_ATTEMPTS
-            ? { continuationDelivery: "invalidated", orphanWakeAttempts: attempts }
-            : { orphanWakeAttempts: attempts };
-        if (!restored && attempts >= ORPHAN_WAKE_ATTEMPTS)
-          logger.warn({ recoveryActionId: action.id, attempts }, "Orphaned reconciliation was never admitted; delivery invalidated");
+        if (!restored) {
+          await markAttempted(action);
+          continue;
+        }
         await db
           .update(issueRecoveryActions)
-          .set({ evidence: sql`${issueRecoveryActions.evidence} || ${JSON.stringify(settled)}::jsonb` })
+          .set({
+            evidence: sql`${issueRecoveryActions.evidence} || ${JSON.stringify({
+              continuationDelivery: "assignee_wake",
+              continuationRunId: restored.id,
+            })}::jsonb`,
+          })
           .where(pendingDecision);
         continue;
       }
@@ -378,11 +396,13 @@ export async function deliverReconciledExecutions(
             })
             .where(pendingDecision);
         });
+      else await markAttempted(action);
     } catch {
       logger.warn(
         { recoveryActionId: action.id },
         "Reconciled execution continuation remains pending for retry",
       );
+      await markAttempted(action).catch(() => undefined);
     }
   }
 }

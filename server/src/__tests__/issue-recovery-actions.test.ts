@@ -4,7 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import express from "express";
 import request from "supertest";
-import { and, eq } from "drizzle-orm";
+import { and, eq, sql } from "drizzle-orm";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import {
   agents,
@@ -1963,35 +1963,44 @@ describeEmbeddedPostgres("issue recovery actions", () => {
     expect(run).toMatchObject({ agentId: coderId, retryOfRunId: null, status: "queued" });
   });
 
-  it("retries an unadmitted orphan wake a bounded number of times, then frees the batch", async () => {
+  it("keeps unadmitted orphans pending without holding the batch, and delivers them once admitted", async () => {
     const adopted: { id: string; coderId: string }[] = [];
     for (let i = 0; i < 25; i++) {
       const { action, coderId } = await seedAdoptedOrphan();
       adopted.push({ id: action.id, coderId });
     }
     const { action, heartbeat } = await seedReconciledDelivery();
-    const attempts = new Map<string, number>();
+    let admitting = false;
+    const admitted = new Map<string, string>();
     const wake: typeof heartbeat.wakeup = async (agentId, opts) => {
       if (!adopted.some((a) => a.coderId === agentId)) return heartbeat.wakeup(agentId, opts);
-      attempts.set(agentId, (attempts.get(agentId) ?? 0) + 1);
       expect(opts?.idempotencyKey).not.toMatch(/^execution-reconciliation:/);
       expect(opts?.contextSnapshot).not.toHaveProperty("retryOfRunId");
-      return null;
+      if (!admitting) return null;
+      const runId = randomUUID();
+      admitted.set(agentId, runId);
+      return { id: runId } as Awaited<ReturnType<typeof heartbeat.wakeup>>;
     };
-    for (let sweep = 1; sweep <= 2; sweep++) {
-      await deliverReconciledExecutions(db, wake);
-      const [row] = await db.select().from(issueRecoveryActions).where(eq(issueRecoveryActions.id, adopted[0]!.id));
-      expect(row!.evidence).toMatchObject({ continuationDelivery: "pending", orphanWakeAttempts: sweep });
-    }
+    // Every orphan refused: the other company's continuation still gets its
+    // turn, even stored behind them (an unchanged write moves its row last).
     await deliverReconciledExecutions(db, wake);
+    await db.update(issueRecoveryActions).set({ evidence: sql`${issueRecoveryActions.evidence}` })
+      .where(eq(issueRecoveryActions.id, action.id));
+    await deliverReconciledExecutions(db, wake);
+    const [valid] = await db.select().from(issueRecoveryActions).where(eq(issueRecoveryActions.id, action.id));
+    expect(valid!.evidence).toMatchObject({ continuationDelivery: "delivered" });
+    // Three more refused sweeps, then admission: no orphan was dropped.
+    for (let sweep = 0; sweep < 3; sweep++) await deliverReconciledExecutions(db, wake);
+    for (const { id } of adopted) {
+      const [row] = await db.select().from(issueRecoveryActions).where(eq(issueRecoveryActions.id, id));
+      expect(row!.evidence).toMatchObject({ continuationDelivery: "pending" });
+    }
+    admitting = true;
     await deliverReconciledExecutions(db, wake);
     for (const { id, coderId } of adopted) {
       const [row] = await db.select().from(issueRecoveryActions).where(eq(issueRecoveryActions.id, id));
-      expect(row!.evidence).toMatchObject({ continuationDelivery: "invalidated", orphanWakeAttempts: 3 });
-      expect(attempts.get(coderId)).toBe(3);
+      expect(row!.evidence).toMatchObject({ continuationDelivery: "assignee_wake", continuationRunId: admitted.get(coderId) });
     }
-    const [valid] = await db.select().from(issueRecoveryActions).where(eq(issueRecoveryActions.id, action.id));
-    expect(valid!.evidence).toMatchObject({ continuationDelivery: "delivered" });
   });
 
   it("still refuses an orphaned-hold reconciliation that names another run", async () => {
