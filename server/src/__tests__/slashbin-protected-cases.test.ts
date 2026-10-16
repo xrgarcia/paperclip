@@ -317,6 +317,8 @@ describeEmbeddedPostgres("protected cases routes", () => {
         .expect(200);
       expect(put.body.revision.revisionNumber).toBe(current.body.latestRevisionNumber + 1);
       expect(put.body.revision.changeSummary).toBe(`edit by ${name}`);
+      expect(put.body.document.key).toBe("body");
+      expect(put.body.document.body).toBe(`by ${name}`);
       await http.patch(`/api/cases/${s.policy.id}`).send({ summary: `touched by ${name}` }).expect(200);
       await http.post(`/api/cases/${s.policy.id}/documents/body/lock`).expect(200);
       await http.post(`/api/cases/${s.policy.id}/documents/body/unlock`).expect(200);

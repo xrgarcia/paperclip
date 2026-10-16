@@ -532,7 +532,15 @@ export function CaseDetail() {
         if (caseData.protected && !summary) {
           throw new Error("Describe this change in \"Change summary\" before saving a protected policy document.");
         }
-        const result = await casesApi.upsertDocument(caseIdentifier, key, summary ? { ...data, changeSummary: summary } : data);
+        // The Case document validator takes an optional string title, not null — a
+        // blank title in the editor arrives here as null and must be left out.
+        const { title, ...rest } = data;
+        const payload = {
+          ...rest,
+          ...(title ? { title } : {}),
+          ...(summary ? { changeSummary: summary } : {}),
+        };
+        const result = await casesApi.upsertDocument(caseIdentifier, key, payload);
         return caseDocumentToIssueDocument(caseData.id, result.document.key, result.document);
       },
       deleteDocument: (key: string) => casesApi.deleteDocument(caseIdentifier, key),

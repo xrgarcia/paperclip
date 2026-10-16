@@ -284,8 +284,25 @@ describe("CaseDetail", () => {
       Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!.call(input, "Tighten refund window");
       input.dispatchEvent(new Event("input", { bubbles: true }));
     });
-    await documentSection.subject!.upsertDocument("policy", draft).catch(() => undefined);
-    expect(mockCasesApi.upsertDocument).toHaveBeenCalledWith("PAP-C7", "policy", { ...draft, changeSummary: "Tighten refund window" });
+    const saved = {
+      document: {
+        id: "doc-policy", key: "policy", title: null, format: "markdown", body: "v3", latestBody: "v3",
+        latestRevisionId: "rev-9", latestRevisionNumber: 9, createdAt: "2026-10-16T00:00:00.000Z", updatedAt: "2026-10-16T00:00:00.000Z",
+      },
+      revision: {},
+    };
+    mockCasesApi.upsertDocument.mockResolvedValue(saved);
+    // Blank title: left out of the request (the server validator refuses title:null).
+    const result = await documentSection.subject!.upsertDocument("policy", draft) as { key: string };
+    expect(mockCasesApi.upsertDocument).toHaveBeenLastCalledWith("PAP-C7", "policy", {
+      format: "markdown", body: "v3", baseRevisionId: "rev-8", changeSummary: "Tighten refund window",
+    });
+    expect(result.key).toBe("policy");
+
+    await documentSection.subject!.upsertDocument("policy", { ...draft, title: "Policy" });
+    expect(mockCasesApi.upsertDocument).toHaveBeenLastCalledWith("PAP-C7", "policy", {
+      title: "Policy", format: "markdown", body: "v3", baseRevisionId: "rev-8", changeSummary: "Tighten refund window",
+    });
 
     act(() => root.unmount());
   });

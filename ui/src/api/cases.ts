@@ -308,7 +308,7 @@ export const casesApi = {
   upsertDocument: (
     idOrIdentifier: string,
     key: string,
-    data: { title?: string | null; format?: string; body: string; baseRevisionId?: string | null; changeSummary?: string },
+    data: { title?: string; format?: string; body: string; baseRevisionId?: string | null; changeSummary?: string },
   ) =>
     api.put<{ document: CaseDocument & { key: string; body: string }; revision: CaseDocumentRevision }>(
       `/cases/${idOrIdentifier}/documents/${encodeURIComponent(key)}`,
