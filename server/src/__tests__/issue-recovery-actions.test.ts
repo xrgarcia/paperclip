@@ -1865,13 +1865,33 @@ describeEmbeddedPostgres("issue recovery actions", () => {
   }
 
   it("lets the board reconcile a legacy hold whose source run was deleted", async () => {
-    const { action, reconciliation, sourceIssueId } = await seedOrphanedLegacyHold();
+    const { action, reconciliation, sourceIssueId, coderId, companyId } = await seedOrphanedLegacyHold();
     const res = await request(createApp()).post(`/api/issues/${sourceIssueId}/recovery-actions/resolve`)
       .send({ actionId: action.id, outcome: "restored", sourceIssueStatus: "todo", executionReconciliation: reconciliation });
     expect(res.status, JSON.stringify(res.body)).toBe(200);
     expect(res.body.issue.status).toBe("todo");
     const [settled] = await db.select().from(issueRecoveryActions).where(eq(issueRecoveryActions.id, action.id));
     expect(settled!.evidence.automaticRecovery).toBeUndefined();
+    expect(settled!.returnOwnerAgentId).toBe(coderId);
+    expect(settled!.evidence).toMatchObject({ continuationDelivery: "pending", orphanedSourceRun: true });
+
+    // The continuation reaches the task's current assignee, with no deleted run to link to.
+    const responsibleUserId = randomUUID();
+    await db.insert(authUsers).values({ id: responsibleUserId, name: "Recovery operator",
+      email: `${responsibleUserId}@example.test`, emailVerified: true, createdAt: new Date(), updatedAt: new Date() });
+    await db.update(companies).set({ defaultResponsibleUserId: responsibleUserId }).where(eq(companies.id, companyId));
+    await db.update(agents).set({ runtimeConfig: { heartbeat: { maxConcurrentRuns: 1 } } }).where(eq(agents.id, coderId));
+    // Occupy the agent's only dispatch slot: real wake admission, no provider launch.
+    await seedHeartbeatRun({ companyId, agentId: coderId, runId: randomUUID(), status: "running" });
+    await deliverReconciledExecutions(db, heartbeatService(db, { runtimeEnv: {} }).wakeup);
+    const wakes = await db.select().from(agentWakeupRequests)
+      .where(eq(agentWakeupRequests.idempotencyKey, `execution-reconciliation:${action.id}`));
+    expect(wakes).toHaveLength(1);
+    expect(wakes[0]!.agentId).toBe(coderId);
+    const [delivered] = await db.select().from(issueRecoveryActions).where(eq(issueRecoveryActions.id, action.id));
+    expect(delivered!.evidence).toMatchObject({ continuationDelivery: "delivered", continuationRunId: wakes[0]!.runId });
+    const [continuation] = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, wakes[0]!.runId!));
+    expect(continuation!.retryOfRunId).toBeNull();
   });
 
   it("still refuses an orphaned-hold reconciliation that names another run", async () => {

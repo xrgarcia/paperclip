@@ -9249,6 +9249,7 @@ export function issueRoutes(
           }
         }
 
+        let orphanedSource = false;
         if (
           sourceIssueStatus === "todo" &&
           requiresExecutionReconciliation(activeRecoveryAction.cause)
@@ -9262,7 +9263,7 @@ export function issueRoutes(
           // anything to check it against and defers every wake of the task's next
           // assignee. A board operator may record outcomes for a hold whose source
           // run no longer exists; nothing is left running to stop or inspect.
-          const orphanedSource =
+          orphanedSource =
             req.actor.type === "board" &&
             !!lockedIssue.assigneeAgentId &&
             typeof sourceRunId === "string" &&
@@ -9350,6 +9351,24 @@ export function issueRoutes(
               ? { kind: "chat_failed_run_retry", actionId: chatRetry.actionId }
               : undefined,
           );
+          if (orphanedSource) {
+            // Slashbin patch (EM#608): the hold's own owner and run are gone, so
+            // its continuation belongs to whoever holds the task now. Recording
+            // that owner lets deliverReconciledExecutions wake them; the marker
+            // tells it there is no source run left to link the new run to.
+            await tx
+              .update(issueRecoveryActions)
+              .set({
+                returnOwnerAgentId: lockedIssue.assigneeAgentId,
+                evidence: sql`${issueRecoveryActions.evidence} || '{"orphanedSourceRun":true}'::jsonb`,
+              })
+              .where(
+                and(
+                  eq(issueRecoveryActions.companyId, lockedIssue.companyId),
+                  eq(issueRecoveryActions.id, activeRecoveryAction.id),
+                ),
+              );
+          }
         }
         let issue = lockedIssue;
         const sourceStatusChanged = sourceIssueStatus !== lockedIssue.status;

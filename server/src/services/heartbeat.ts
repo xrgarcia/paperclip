@@ -27490,6 +27490,7 @@ export function heartbeatService(
 
           let reconciledSourceRunId: string | null = null;
           let reconciledRestoreRetryCount: number | null = null;
+          let reconciledSourceRunExists = false;
           if (executionReconciliationWake) {
             const actionId = readNonEmptyString(
               enrichedContextSnapshot.recoveryActionId,
@@ -27603,6 +27604,9 @@ export function heartbeatService(
               reconciledRestoreRetryCount = executionFailureRetryCount(reconciledRun!);
             }
             reconciledSourceRunId = sourceRunId;
+            // Slashbin patch (EM#608): a hold settled after its agent was deleted
+            // names a run that is gone; the continuation runs without the link.
+            reconciledSourceRunExists = !!reconciledRun;
           }
 
           let continuationWait = { reason: "execution_recovery", message: "Waiting for execution recovery. Your message is saved." };
@@ -28545,7 +28549,7 @@ export function heartbeatService(
                 : enrichedContextSnapshot,
               sessionIdBefore: explicitContinuation ? null : sessionBefore,
               continuationAttempt,
-              ...(reconciledSourceRunId
+              ...(reconciledSourceRunId && reconciledSourceRunExists
                 ? { retryOfRunId: reconciledSourceRunId }
                 : {}),
               ...(reconciledRestoreRetryCount !== null ? {
