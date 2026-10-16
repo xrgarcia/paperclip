@@ -1932,6 +1932,39 @@ describeEmbeddedPostgres("issue recovery actions", () => {
     expect(valid!.evidence).toMatchObject({ continuationDelivery: "delivered" });
   });
 
+  it("moves earlier adopted-owner reconciliations of a deleted run out of the batch and wakes their assignee", async () => {
+    const adopted: { id: string; coderId: string }[] = [];
+    for (let i = 0; i < 25; i++) {
+      const { action, reconciliation, sourceIssueId, coderId } = await seedOrphanedLegacyHold();
+      await db.update(issues).set({ status: "todo" }).where(eq(issues.id, sourceIssueId));
+      // The shape the earlier revision left: the assignee adopted as return
+      // owner, pending delivery of a continuation naming the deleted run.
+      await db.update(issueRecoveryActions).set({ outcome: "restored", returnOwnerAgentId: coderId,
+        evidence: { runId: reconciliation.runId, continuationDelivery: "pending", executionReconciliation: reconciliation } })
+        .where(eq(issueRecoveryActions.id, action.id));
+      adopted.push({ id: action.id, coderId });
+    }
+    const { action, heartbeat } = await seedReconciledDelivery();
+    const woken: string[] = [];
+    const wake: typeof heartbeat.wakeup = async (agentId, opts) => {
+      if (!adopted.some((a) => a.coderId === agentId)) return heartbeat.wakeup(agentId, opts);
+      woken.push(agentId);
+      // The deleted run must never be named as a predecessor.
+      expect(opts?.contextSnapshot).not.toHaveProperty("retryOfRunId");
+      expect(opts?.contextSnapshot).not.toHaveProperty("previousRunId");
+      return null;
+    };
+    await deliverReconciledExecutions(db, wake);
+    await deliverReconciledExecutions(db, wake);
+    for (const { id, coderId } of adopted) {
+      const [row] = await db.select().from(issueRecoveryActions).where(eq(issueRecoveryActions.id, id));
+      expect(row!.evidence).toMatchObject({ continuationDelivery: "assignee_wake" });
+      expect(woken.filter((a) => a === coderId)).toHaveLength(1);
+    }
+    const [valid] = await db.select().from(issueRecoveryActions).where(eq(issueRecoveryActions.id, action.id));
+    expect(valid!.evidence).toMatchObject({ continuationDelivery: "delivered" });
+  });
+
   it("still refuses an orphaned-hold reconciliation that names another run", async () => {
     const { action, reconciliation, sourceIssueId } = await seedOrphanedLegacyHold();
     await request(createApp()).post(`/api/issues/${sourceIssueId}/recovery-actions/resolve`)

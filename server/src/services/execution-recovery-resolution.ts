@@ -276,6 +276,48 @@ export async function deliverReconciledExecutions(
           .where(pendingDecision);
         continue;
       }
+      // Slashbin patch (EM#608): a reconciled continuation names its
+      // predecessor run; once that run is deleted it can never be admitted,
+      // and a record retried forever keeps its place in the 25-row batch.
+      // Such a record (left by an earlier revision that adopted the assignee
+      // as return owner) leaves pending first, then gets the ordinary
+      // restored wake, as the route now gives a new orphaned hold.
+      const [predecessor] = await db
+        .select({ id: heartbeatRuns.id })
+        .from(heartbeatRuns)
+        .where(
+          and(
+            eq(heartbeatRuns.companyId, action.companyId),
+            eq(heartbeatRuns.id, decision.runId),
+          ),
+        );
+      if (!predecessor) {
+        const [claimed] = await db
+          .update(issueRecoveryActions)
+          .set({
+            evidence: sql`${issueRecoveryActions.evidence} || '{"continuationDelivery":"assignee_wake"}'::jsonb`,
+          })
+          .where(pendingDecision)
+          .returning({ id: issueRecoveryActions.id });
+        if (!claimed) continue;
+        await wake(action.returnOwnerAgentId, {
+          source: "automation",
+          triggerDetail: "system",
+          reason: "issue_recovery_action_restored",
+          idempotencyKey: `execution-reconciliation:${action.id}`,
+          payload: { issueId: task.id, recoveryActionId: action.id },
+          requestedByActorType: "system",
+          requestedByActorId: "execution-recovery",
+          contextSnapshot: {
+            issueId: task.id,
+            taskId: task.id,
+            wakeReason: "issue_recovery_action_restored",
+            source: "issue.recovery_action_resolution",
+            recoveryActionId: action.id,
+          },
+        });
+        continue;
+      }
       const run = await wake(action.returnOwnerAgentId, {
         source: "automation",
         triggerDetail: "system",
