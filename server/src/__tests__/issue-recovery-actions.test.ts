@@ -1874,17 +1874,37 @@ describeEmbeddedPostgres("issue recovery actions", () => {
     expect(settled!.evidence.automaticRecovery).toBeUndefined();
   });
 
-  it("returns an orphaned hold's continuation to the task's current assignee", async () => {
-    const { action, reconciliation, sourceIssueId, coderId } = await seedOrphanedLegacyHold();
-    await request(createApp()).post(`/api/issues/${sourceIssueId}/recovery-actions/resolve`)
+  it("wakes an orphaned hold's current assignee, never naming the deleted run", async () => {
+    const { action, reconciliation, sourceIssueId, coderId, companyId } = await seedOrphanedLegacyHold();
+    const responsibleUserId = randomUUID();
+    await db.insert(authUsers).values({ id: responsibleUserId, name: "Recovery operator", email: `${responsibleUserId}@example.test`,
+      emailVerified: true, createdAt: new Date(), updatedAt: new Date() });
+    await db.update(companies).set({ defaultResponsibleUserId: responsibleUserId }).where(eq(companies.id, companyId));
+    // The real heartbeat admission: a wake that named the deleted run as its
+    // predecessor (retryOfRunId) would fail its foreign key here.
+    const heartbeat = heartbeatService(db, { runtimeEnv: {} });
+    const runs: string[] = [];
+    await request(createApp(undefined, {
+      recoveryActionEnqueueWakeup: async (agentId, wake) => {
+        const run = await heartbeat.wakeup(agentId, wake);
+        if (run) runs.push(run.id);
+        return run;
+      },
+    })).post(`/api/issues/${sourceIssueId}/recovery-actions/resolve`)
       .send({ actionId: action.id, outcome: "restored", sourceIssueStatus: "todo", executionReconciliation: reconciliation })
       .expect(200);
     const [settled] = await db.select().from(issueRecoveryActions).where(eq(issueRecoveryActions.id, action.id));
-    expect(settled!.returnOwnerAgentId).toBe(coderId);
-    expect(settled!.evidence).toMatchObject({ continuationDelivery: "pending" });
+    expect(settled!.evidence).toMatchObject({ continuationDelivery: "assignee_wake", executionReconciliation: { runId: reconciliation.runId } });
+    const wakes = await db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.agentId, coderId));
+    expect(wakes).toHaveLength(1);
+    expect(wakes[0]).toMatchObject({ reason: "issue_recovery_action_restored" });
+    expect(runs).toHaveLength(1);
+    const [run] = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, runs[0]!));
+    expect(run!.retryOfRunId).toBeNull();
+    // The delivery worker never selects it.
     const woken: string[] = [];
     await deliverReconciledExecutions(db, async (agentId) => { woken.push(agentId); return null; });
-    expect(woken).toEqual([coderId]);
+    expect(woken).toEqual([]);
   });
 
   it("closes out undeliverable reconciliations so they cannot starve another company's delivery", async () => {

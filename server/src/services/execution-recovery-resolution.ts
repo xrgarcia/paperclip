@@ -142,11 +142,13 @@ export async function markExecutionReconciliation(
   decision: ExecutionReconciliation,
   actorId: string,
   deliveryOwner?: { kind: "chat_failed_run_retry"; actionId: string },
-  // Slashbin patch (EM#608): an orphaned hold's return owner was deleted with
-  // its agent (FK set null). The board restored the task to its current
-  // assignee, so the continuation returns there; without an owner the worker
-  // could never deliver it.
-  adoptReturnOwnerAgentId?: string,
+  // Slashbin patch (EM#608): the source run of an orphaned hold was deleted
+  // with its agent. A reconciled continuation names its predecessor run
+  // (retryOfRunId, continuation context), so one can never be built for it.
+  // The route instead wakes the task's current assignee as an ordinary
+  // restore does; the decision still reaches it as a recovery outcome. The
+  // record is marked so the delivery worker never selects it.
+  orphanedSource = false,
 ) {
   if (deliveryOwner) {
     const [retry] = await db
@@ -192,10 +194,13 @@ export async function markExecutionReconciliation(
           actorId,
           recordedAt: new Date().toISOString(),
         },
-        continuationDelivery: deliveryOwner ? "delegated" : "pending",
+        continuationDelivery: deliveryOwner
+          ? "delegated"
+          : orphanedSource
+            ? "assignee_wake"
+            : "pending",
         ...(deliveryOwner ? { continuationDeliveryOwner: deliveryOwner } : {}),
       },
-      ...(adoptReturnOwnerAgentId ? { returnOwnerAgentId: adoptReturnOwnerAgentId } : {}),
     })
     .where(
       and(

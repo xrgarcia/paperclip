@@ -17,6 +17,7 @@ SERVER_FILES=(
   routes/cases.ts
   slashbin/protected-cases.ts
   services/companies.ts
+  services/execution-recovery-resolution.ts
   routes/projects.ts
 )
 

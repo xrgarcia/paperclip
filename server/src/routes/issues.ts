@@ -9350,11 +9350,7 @@ export function issueRoutes(
             chatRetry
               ? { kind: "chat_failed_run_retry", actionId: chatRetry.actionId }
               : undefined,
-            orphanedSource &&
-              !activeRecoveryAction.returnOwnerAgentId &&
-              lockedIssue.assigneeAgentId
-              ? lockedIssue.assigneeAgentId
-              : undefined,
+            orphanedSource,
           );
         }
         let issue = lockedIssue;
@@ -9516,7 +9512,7 @@ export function issueRoutes(
         );
         if (!recoveryAction) throw notFound("Active recovery action not found");
 
-        return { issue, recoveryAction, chatRetry };
+        return { issue, recoveryAction, chatRetry, orphanedSource };
       });
       if (result.replayed) {
         res.json({
@@ -9588,7 +9584,9 @@ export function issueRoutes(
           );
         }
       } else if (
-        !executionReconciliation &&
+        // Slashbin patch (EM#608): an orphaned hold has no reconciled
+        // continuation to deliver, so its assignee gets the ordinary wake.
+        (!executionReconciliation || ("orphanedSource" in result && result.orphanedSource)) &&
         sourceIssueStatus === "todo" &&
         result.issue.assigneeAgentId &&
         (existing.status !== result.issue.status ||
