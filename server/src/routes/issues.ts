@@ -9254,16 +9254,39 @@ export function issueRoutes(
           requiresExecutionReconciliation(activeRecoveryAction.cause)
         ) {
           assertBoardOrBridgedSelf(activeRecoveryAction.cause);
-          await validateExecutionReconciliation({
-            db: tx as unknown as Db,
-            companyId: lockedIssue.companyId,
-            issueId: lockedIssue.id,
-            agentId: lockedIssue.assigneeAgentId,
-            sourceRunId:
-              activeRecoveryAction.evidence.runId ??
-              activeRecoveryAction.evidence.sourceRunId,
-            decision: executionReconciliation,
-          });
+          const sourceRunId =
+            activeRecoveryAction.evidence.runId ??
+            activeRecoveryAction.evidence.sourceRunId;
+          // Slashbin patch (EM#608): deleting an agent deletes its runs but keeps
+          // the no-replay hold its last run left on a task, so the hold outlives
+          // anything to check it against and defers every wake of the task's next
+          // assignee. A board operator may record outcomes for a hold whose source
+          // run no longer exists; nothing is left running to stop or inspect.
+          const orphanedSource =
+            req.actor.type === "board" &&
+            !!lockedIssue.assigneeAgentId &&
+            typeof sourceRunId === "string" &&
+            executionReconciliation?.runId === sourceRunId &&
+            !(await tx
+              .select({ id: heartbeatRuns.id })
+              .from(heartbeatRuns)
+              .where(
+                and(
+                  eq(heartbeatRuns.companyId, lockedIssue.companyId),
+                  eq(heartbeatRuns.id, sourceRunId),
+                ),
+              )
+              .then((rows) => rows[0] ?? null));
+          if (!orphanedSource) {
+            await validateExecutionReconciliation({
+              db: tx as unknown as Db,
+              companyId: lockedIssue.companyId,
+              issueId: lockedIssue.id,
+              agentId: lockedIssue.assigneeAgentId,
+              sourceRunId,
+              decision: executionReconciliation,
+            });
+          }
         } else if (executionReconciliation) {
           throw conflict(
             "An execution reconciliation must target the current execution recovery action and continue the task.",
