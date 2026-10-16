@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Check, ChevronDown, Copy, MoreVertical, Plus, SlidersHorizontal } from "lucide-react";
 import { Link, Navigate, useCaseHref, useParams } from "@/lib/router";
@@ -453,6 +453,11 @@ export function CaseDetail() {
   const queryClient = useQueryClient();
   const caseHref = useCaseHref();
   const [copied, setCopied] = useState(false);
+  // Slashbin patch (EM#629): a protected Case records why each revision was made.
+  // Read through a ref so typing does not rebuild the document subject.
+  const [changeSummary, setChangeSummary] = useState("");
+  const changeSummaryRef = useRef("");
+  changeSummaryRef.current = changeSummary;
 
   const caseQuery = useQuery({
     queryKey: queryKeys.cases.detail(caseIdentifier ?? ""),
@@ -523,12 +528,16 @@ export function CaseDetail() {
         return caseDocumentToIssueDocument(caseData.id, document.key, document);
       },
       upsertDocument: async (key: string, data: { title: string | null; format: "markdown"; body: string; baseRevisionId: string | null }) => {
-        const result = await casesApi.upsertDocument(caseIdentifier, key, data);
+        const summary = changeSummaryRef.current.trim();
+        if (caseData.protected && !summary) {
+          throw new Error("Describe this change in \"Change summary\" before saving a protected policy document.");
+        }
+        const result = await casesApi.upsertDocument(caseIdentifier, key, summary ? { ...data, changeSummary: summary } : data);
         return caseDocumentToIssueDocument(caseData.id, result.document.key, result.document);
       },
       deleteDocument: (key: string) => casesApi.deleteDocument(caseIdentifier, key),
-      restoreDocumentRevision: async (key: string, revisionId: string) => {
-        const result = await casesApi.restoreDocumentRevision(caseIdentifier, key, revisionId);
+      restoreDocumentRevision: async (key: string, revisionId: string, baseRevisionId: string | null) => {
+        const result = await casesApi.restoreDocumentRevision(caseIdentifier, key, revisionId, baseRevisionId);
         return caseDocumentToIssueDocument(caseData.id, result.document.key, result.document);
       },
       setDocumentLock: async (key: string, locked: boolean) => {
@@ -674,6 +683,18 @@ export function CaseDetail() {
         </TabsList>
 
         <TabsContent value="overview" className="space-y-6">
+          {caseDocumentSubject && caseData.protected ? (
+            <section className="space-y-1">
+              <label htmlFor="case-change-summary" className="text-sm font-semibold">Change summary</label>
+              <Input
+                id="case-change-summary"
+                value={changeSummary}
+                onChange={(event) => setChangeSummary(event.target.value)}
+                placeholder="Why you are changing this policy (recorded on each revision you save)"
+              />
+            </section>
+          ) : null}
+
           {caseDocumentSubject ? (
             <IssueDocumentsSection
               subject={caseDocumentSubject}

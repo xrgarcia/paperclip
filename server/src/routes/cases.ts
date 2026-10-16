@@ -53,11 +53,13 @@ import { assertCompanyAccess, getActorInfo, hasCompanyAccess } from "./authz.js"
 import { logger } from "../middleware/logger.js";
 import {
   PROTECTED_CASES_ENV,
+  assertAttachmentAllowed,
   assertCaseProtectionAvailable,
   assertCaseWritable,
   assertChangeSummary,
   assertDocumentDeletable,
   assertRestoreBase,
+  isProtectedCase,
   parseCaseProtection,
 } from "../slashbin/protected-cases.js";
 
@@ -564,6 +566,11 @@ export function caseRoutes(db: Db, storage: StorageService) {
   if (caseProtection.status === "invalid") {
     logger.error({ error: caseProtection.error }, "case protection config invalid; all case writes refused");
   }
+  // Every case detail reply says whether it is protected, so the Case page asks
+  // for a changeSummary on saves.
+  async function caseDetailResponse(row: typeof cases.$inferSelect) {
+    return { ...(await loadCaseDetail(db, row)), protected: isProtectedCase(caseProtection, row) };
+  }
 
   // Filing a case under a protected parent adds to the policy container.
   async function assertParentCaseWritable(tx: CaseRouteDb, req: Request, companyId: string, parentCaseId: string | null) {
@@ -696,7 +703,7 @@ export function caseRoutes(db: Db, storage: StorageService) {
       return { created: true, row: created! };
     });
 
-    res.status(result.created ? 201 : 200).json(await loadCaseDetail(db, result.row));
+    res.status(result.created ? 201 : 200).json(await caseDetailResponse(result.row));
   });
 
   router.get("/companies/:companyId/cases", async (req, res) => {
@@ -1273,6 +1280,7 @@ export function caseRoutes(db: Db, storage: StorageService) {
     await assertCasesEnabled(db);
     const caseRow = await assertCaseAccess(db, req, req.params.id as string);
     assertCaseWritable(caseProtection, req, caseRow);
+    assertAttachmentAllowed(caseProtection, caseRow);
     const actor = getActorInfo(req);
 
     try {
@@ -1444,7 +1452,7 @@ export function caseRoutes(db: Db, storage: StorageService) {
   router.get("/cases/:id", async (req, res, next) => {
     const row = await resolveSharedPathCase(db, req, req.params.id as string);
     if (!row) return next();
-    res.json(await loadCaseDetail(db, row));
+    res.json(await caseDetailResponse(row));
   });
 
   router.patch("/cases/:id", async (req, res, next) => {
@@ -1531,7 +1539,7 @@ export function caseRoutes(db: Db, storage: StorageService) {
       await autoLinkRunIssue(tx, { companyId: caseRow.companyId, caseId: caseRow.id, actor, role: "work" });
       return row!;
     });
-    res.json(await loadCaseDetail(db, updated));
+    res.json(await caseDetailResponse(updated));
   });
 
   return router;

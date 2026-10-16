@@ -48,12 +48,14 @@ describe("parseCaseProtection", () => {
     for (const raw of [
       "{",
       "[]",
-      JSON.stringify({ types: { bug: { users: [], agents: [] } } }),
-      JSON.stringify({ cases: { "SLA-C1": { users: [], agents: [] } } }),
-      JSON.stringify({ types: { "company-policy": { users: "ray", agents: [] } } }),
-      JSON.stringify({ types: { "company-policy": { users: [], agents: ["not-a-uuid"] } } }),
-      JSON.stringify({ types: { "company-policy": { users: [], agents: [], admins: [] } } }),
+      JSON.stringify({ types: { bug: { users: [], agentKeys: [] } } }),
+      JSON.stringify({ cases: { "SLA-C1": { users: [], agentKeys: [] } } }),
+      JSON.stringify({ types: { "company-policy": { users: "ray", agentKeys: [] } } }),
+      JSON.stringify({ types: { "company-policy": { users: [], agentKeys: ["not-a-uuid"] } } }),
+      JSON.stringify({ types: { "company-policy": { users: [], agentKeys: [], admins: [] } } }),
       JSON.stringify({ editors: {} }),
+      // Agents are named by API key id only; an agent id would admit every key it is ever issued.
+      JSON.stringify({ types: { "company-policy": { users: [], agents: [randomUUID()] } } }),
     ]) {
       expect(parseCaseProtection(raw).status, raw).toBe("invalid");
     }
@@ -181,7 +183,8 @@ describeEmbeddedPostgres("protected cases routes", () => {
       title: "Ordinary",
     }).returning();
     const [issue] = await db.insert(issues).values({ companyId: company!.id, title: "Task", status: "todo" }).returning();
-    const editors = { users: [RAY], agents: [po.id] };
+    const poKeyId = randomUUID();
+    const editors = { users: [RAY], agentKeys: [poKeyId] };
     const config = JSON.stringify({
       types: { "company-policy": editors },
       cases: { [fixture!.id]: editors },
@@ -192,10 +195,19 @@ describeEmbeddedPostgres("protected cases routes", () => {
       rayBoardKey: { type: "board", userId: RAY, source: "board_key", keyId: "k", companyIds, isInstanceAdmin: true },
       adminSession: { type: "board", userId: "other-admin", source: "session", companyIds, isInstanceAdmin: true },
       localImplicit: { type: "board", userId: RAY, source: "local_implicit", isInstanceAdmin: true },
-      poKey: { type: "agent", agentId: po.id, companyId: company!.id, source: "agent_key", keyScope: { kind: "standard" } },
+      poKey: {
+        type: "agent", agentId: po.id, companyId: company!.id, source: "agent_key", keyId: poKeyId,
+        keyScope: { kind: "standard" },
+      },
+      // What a board key can obtain for the PO: a freshly minted standard key, or a
+      // run JWT from a heartbeat after rewriting the PO's adapter.
+      poMintedKey: {
+        type: "agent", agentId: po.id, companyId: company!.id, source: "agent_key", keyId: randomUUID(),
+        keyScope: { kind: "standard" },
+      },
       poJwt: { type: "agent", agentId: po.id, companyId: company!.id, source: "agent_jwt", runId: poRunId },
       poBridgeKey: {
-        type: "agent", agentId: po.id, companyId: company!.id, source: "agent_key",
+        type: "agent", agentId: po.id, companyId: company!.id, source: "agent_key", keyId: poKeyId,
         keyScope: { kind: "task_bridge", projectId: randomUUID() },
       },
       reader: { type: "agent", agentId: reader.id, companyId: company!.id, source: "agent_key", keyScope: { kind: "standard" } },
@@ -275,7 +287,7 @@ describeEmbeddedPostgres("protected cases routes", () => {
     const s = await seed();
     for (const target of [s.policy, s.fixture]) {
       const before = await snapshot(target.id);
-      for (const name of ["rayBoardKey", "adminSession", "localImplicit", "poBridgeKey", "reader"] as const) {
+      for (const name of ["rayBoardKey", "adminSession", "localImplicit", "poMintedKey", "poJwt", "poBridgeKey", "reader"] as const) {
         const http = app(s.actors[name], s.config);
         for (const [route, call] of Object.entries(writes(s, target))) {
           const res = await call(http);
@@ -295,9 +307,9 @@ describeEmbeddedPostgres("protected cases routes", () => {
     await app(s.actors.poKey, s.config).post(`/api/companies/${s.company.id}/cases`).send(body).expect(201);
   });
 
-  it("lets Ray's session and the PO (key or run JWT) edit, with history kept", async () => {
+  it("lets Ray's session and the PO's listed key edit, with history kept", async () => {
     const s = await seed();
-    for (const name of ["raySession", "poKey", "poJwt"] as const) {
+    for (const name of ["raySession", "poKey"] as const) {
       const http = app(s.actors[name], s.config);
       const current = await http.get(`/api/cases/${s.policy.id}/documents/body`).expect(200);
       const put = await http.put(`/api/cases/${s.policy.id}/documents/body`)
@@ -311,7 +323,18 @@ describeEmbeddedPostgres("protected cases routes", () => {
     }
     const revisions = await app(s.actors.reader, s.config).get(`/api/cases/${s.policy.id}/documents/body/revisions`).expect(200);
     const list = Array.isArray(revisions.body) ? revisions.body : revisions.body.revisions;
-    expect(list).toHaveLength(5);
+    expect(list).toHaveLength(4);
+  });
+
+  it("tells the Case page which Cases are protected", async () => {
+    const s = await seed();
+    const http = app(s.actors.reader, s.config);
+    for (const [row, expected] of [[s.policy, true], [s.fixture, true], [s.plain, false]] as const) {
+      const res = await http.get(`/api/cases/${row.id}`).expect(200);
+      expect(res.body.protected, row.caseType).toBe(expected);
+    }
+    const patched = await app(s.actors.raySession, s.config).patch(`/api/cases/${s.policy.id}`).send({ summary: "s" }).expect(200);
+    expect(patched.body.protected).toBe(true);
   });
 
   it("holds editors to the history rules: summary, fresh restore base, no delete", async () => {
@@ -337,6 +360,11 @@ describeEmbeddedPostgres("protected cases routes", () => {
     expect(del.body.details?.code).toBe("case_protected");
     const fixtureDel = await app(s.actors.poKey, s.config).delete(`/api/cases/${s.fixture.id}/documents/body`).expect(403);
     expect(fixtureDel.body.details?.code).toBe("case_protected");
+
+    // No attachments either: an asset can be deleted from outside the case router.
+    const attach = await http.post(`/api/cases/${s.policy.id}/attachments`)
+      .attach("file", Buffer.from("x"), "x.txt").expect(403);
+    expect(attach.body.details?.code).toBe("case_protected");
   });
 
   it("keeps reads and annotation threads open to readers", async () => {
@@ -368,7 +396,7 @@ describeEmbeddedPostgres("protected cases routes", () => {
       // A UUID-listed fixture without config is just its own type again.
       await http.patch(`/api/cases/${s.plain.id}`).send({ title: "ok" }).expect(200);
     }
-    const emptyEditors = JSON.stringify({ types: { "company-policy": { users: [], agents: [] } } });
+    const emptyEditors = JSON.stringify({ types: { "company-policy": { users: [], agentKeys: [] } } });
     await app(s.actors.raySession, emptyEditors).patch(`/api/cases/${s.policy.id}`).send({ title: "x" }).expect(403);
   });
 

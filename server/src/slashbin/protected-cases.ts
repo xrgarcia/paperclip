@@ -4,19 +4,23 @@
 //
 // Which Cases are protected is fixed here, not in config: every Case whose type
 // is in PROTECTED_CASE_TYPES, plus Case ids the config names. Removing the config
-// therefore never unprotects anything; it leaves protected Cases with no editors.
+// never unprotects a Case of a protected type; it leaves it with no editors. A
+// Case protected only by its id in config is ordinary again without it.
 //
 // Editors come only from the server env PAPERCLIP_PROTECTED_CASES, outside every
 // API, screen and document, so nobody can grant themselves edit rights:
 //
 //   {
-//     "types": { "company-policy": { "users": ["<userId>"], "agents": ["<agentId>"] } },
-//     "cases": { "<caseId>": { "users": [], "agents": ["<agentId>"] } }
+//     "types": { "company-policy": { "users": ["<userId>"], "agentKeys": ["<agentApiKeyId>"] } },
+//     "cases": { "<caseId>": { "users": [], "agentKeys": ["<agentApiKeyId>"] } }
 //   }
 //
 // A "cases" entry replaces the type's editors for that Case. A user is an editor
 // only through a signed-in session; board API keys act as their minting user, so
-// they are refused even for a listed user. Config that is set but invalid refuses
+// they are refused even for a listed user. An agent is an editor only through one
+// named standard API key, never by its agent id: a board key that may manage the
+// agent can mint it a fresh key, or rewrite its adapter and collect a run JWT, and
+// neither credential is on the list. Config that is set but invalid refuses
 // every Case write (503) until it is fixed; reads are never gated here.
 import type { Request } from "express";
 import { HttpError, conflict, forbidden, unprocessable } from "../errors.js";
@@ -24,7 +28,7 @@ import { HttpError, conflict, forbidden, unprocessable } from "../errors.js";
 export const PROTECTED_CASE_TYPES: readonly string[] = ["company-policy"];
 export const PROTECTED_CASES_ENV = "PAPERCLIP_PROTECTED_CASES";
 
-type Editors = { users: string[]; agents: string[] };
+type Editors = { users: string[]; agentKeys: string[] };
 type ProtectionConfig = { types: Record<string, Editors>; cases: Record<string, Editors> };
 
 export type CaseProtection =
@@ -37,20 +41,20 @@ const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 function parseEditors(where: string, value: unknown): Editors {
   if (!value || typeof value !== "object" || Array.isArray(value)) {
-    throw new Error(`${where} must be an object with users and agents`);
+    throw new Error(`${where} must be an object with users and agentKeys`);
   }
-  const extra = Object.keys(value).filter((k) => k !== "users" && k !== "agents");
+  const extra = Object.keys(value).filter((k) => k !== "users" && k !== "agentKeys");
   if (extra.length > 0) throw new Error(`${where} has unknown keys: ${extra.join(", ")}`);
-  const out: Editors = { users: [], agents: [] };
-  for (const kind of ["users", "agents"] as const) {
+  const out: Editors = { users: [], agentKeys: [] };
+  for (const kind of ["users", "agentKeys"] as const) {
     const list = (value as Record<string, unknown>)[kind] ?? [];
     if (!Array.isArray(list) || list.some((id) => typeof id !== "string" || id.trim() === "")) {
       throw new Error(`${where}.${kind} must be an array of ids`);
     }
-    if (kind === "agents" && list.some((id) => !UUID.test(id))) {
-      throw new Error(`${where}.agents must be agent UUIDs`);
+    if (kind === "agentKeys" && list.some((id) => !UUID.test(id))) {
+      throw new Error(`${where}.agentKeys must be agent API key UUIDs`);
     }
-    out[kind] = list as string[];
+    out[kind] = kind === "agentKeys" ? (list as string[]).map((id) => id.toLowerCase()) : (list as string[]);
   }
   return out;
 }
@@ -103,11 +107,13 @@ function isEditor(req: Request, editors: Editors | null) {
     return actor.source === "session" && typeof actor.userId === "string" && editors.users.includes(actor.userId);
   }
   if (actor.type === "agent") {
-    // A narrowed key (task_bridge, skill_test, comment_only) never edits policy.
-    return (actor.source === "agent_key" || actor.source === "agent_jwt")
+    // Only a listed standard API key. Run JWTs are refused: the server mints one
+    // for whatever process the agent's adapter runs. A narrowed key (task_bridge,
+    // skill_test, comment_only) never edits policy.
+    return actor.source === "agent_key"
       && (!actor.keyScope || actor.keyScope.kind === "standard")
-      && typeof actor.agentId === "string"
-      && editors.agents.includes(actor.agentId);
+      && typeof actor.keyId === "string"
+      && editors.agentKeys.includes(actor.keyId.toLowerCase());
   }
   return false;
 }
@@ -138,6 +144,19 @@ export function assertDocumentDeletable(protection: CaseProtection, row: CaseLik
   assertCaseProtectionAvailable(protection);
   if (isProtectedCase(protection, row)) {
     throw forbidden("Documents of a protected case cannot be deleted", { code: "case_protected", caseId: row.id });
+  }
+}
+
+/**
+ * Protected Cases take no attachments, editors included: policy lives in
+ * revisioned documents, and an attachment's asset can be deleted from outside
+ * this router (a company logo swap deletes the asset it replaces), which would
+ * remove the attachment with no Case write at all.
+ */
+export function assertAttachmentAllowed(protection: CaseProtection, row: CaseLike) {
+  assertCaseProtectionAvailable(protection);
+  if (isProtectedCase(protection, row)) {
+    throw forbidden("Protected cases take no attachments; put policy in a document", { code: "case_protected", caseId: row.id });
   }
 }
 

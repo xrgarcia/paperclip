@@ -43,10 +43,17 @@ vi.mock("@/lib/clipboard", () => ({ copyTextToClipboard: mockCopyTextToClipboard
 vi.mock("@/components/MarkdownBody", () => ({
   MarkdownBody: ({ children }: { children: string }) => <div data-testid="md">{children}</div>,
 }));
+type CapturedSubject = {
+  id: string;
+  upsertDocument: (key: string, data: { title: string | null; format: "markdown"; body: string; baseRevisionId: string | null }) => Promise<unknown>;
+  restoreDocumentRevision: (key: string, revisionId: string, baseRevisionId: string | null) => Promise<unknown>;
+};
+const documentSection = vi.hoisted(() => ({ subject: null as CapturedSubject | null }));
 vi.mock("@/components/IssueDocumentsSection", () => ({
-  IssueDocumentsSection: ({ subject }: { subject?: { id: string } }) => (
-    <div data-testid="case-documents-section">Documents {subject?.id}</div>
-  ),
+  IssueDocumentsSection: ({ subject }: { subject?: CapturedSubject }) => {
+    documentSection.subject = subject ?? null;
+    return <div data-testid="case-documents-section">Documents {subject?.id}</div>;
+  },
 }));
 vi.mock("@/lib/router", () => ({
   useParams: () => ({ caseIdentifier: "PAP-C7" }),
@@ -258,6 +265,39 @@ describe("CaseDetail", () => {
       expect(container.textContent).not.toContain("Revisions");
       expect(container.textContent).not.toContain("1,850");
     });
+
+    act(() => root.unmount());
+  });
+
+  it("asks for a change summary on a protected case and sends it with each save", async () => {
+    mockCasesApi.get.mockResolvedValue({ ...detail(), caseType: "company-policy", protected: true });
+    mockCasesApi.upsertDocument.mockResolvedValue({});
+    const root = renderPage(container);
+    await waitForAssertion(() => expect(container.querySelector("#case-change-summary")).not.toBeNull());
+    const draft = { title: null, format: "markdown" as const, body: "v3", baseRevisionId: "rev-8" };
+
+    await expect(documentSection.subject!.upsertDocument("policy", draft)).rejects.toThrow(/Change summary/);
+    expect(mockCasesApi.upsertDocument).not.toHaveBeenCalled();
+
+    const input = container.querySelector<HTMLInputElement>("#case-change-summary")!;
+    act(() => {
+      Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!.call(input, "Tighten refund window");
+      input.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+    await documentSection.subject!.upsertDocument("policy", draft).catch(() => undefined);
+    expect(mockCasesApi.upsertDocument).toHaveBeenCalledWith("PAP-C7", "policy", { ...draft, changeSummary: "Tighten refund window" });
+
+    act(() => root.unmount());
+  });
+
+  it("shows no change summary on an ordinary case and sends the restore base", async () => {
+    mockCasesApi.restoreDocumentRevision.mockResolvedValue({});
+    const root = renderPage(container);
+    await waitForAssertion(() => expect(container.textContent).toContain("Documents case-1"));
+    expect(container.querySelector("#case-change-summary")).toBeNull();
+
+    await documentSection.subject!.restoreDocumentRevision("body", "rev-2", "rev-8").catch(() => undefined);
+    expect(mockCasesApi.restoreDocumentRevision).toHaveBeenCalledWith("PAP-C7", "body", "rev-2", "rev-8");
 
     act(() => root.unmount());
   });

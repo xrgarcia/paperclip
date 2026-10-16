@@ -123,6 +123,8 @@ export interface CaseDetail extends CaseSummary {
   issueLinks: CaseIssueLink[];
   documents: CaseDocumentRef[];
   attachments: CaseAttachmentRef[];
+  /** Slashbin patch (EM#629): only configured editors write; saves need a changeSummary. */
+  protected?: boolean;
 }
 
 export type CaseEventKind =
@@ -306,7 +308,7 @@ export const casesApi = {
   upsertDocument: (
     idOrIdentifier: string,
     key: string,
-    data: { title?: string | null; format?: string; body: string; baseRevisionId?: string | null },
+    data: { title?: string | null; format?: string; body: string; baseRevisionId?: string | null; changeSummary?: string },
   ) =>
     api.put<{ document: CaseDocument & { key: string; body: string }; revision: CaseDocumentRevision }>(
       `/cases/${idOrIdentifier}/documents/${encodeURIComponent(key)}`,
@@ -316,13 +318,13 @@ export const casesApi = {
     api.post<CaseDocument & { key: string; body: string }>(`/cases/${idOrIdentifier}/documents/${encodeURIComponent(key)}/lock`, {}),
   unlockDocument: (idOrIdentifier: string, key: string) =>
     api.post<CaseDocument & { key: string; body: string }>(`/cases/${idOrIdentifier}/documents/${encodeURIComponent(key)}/unlock`, {}),
-  restoreDocumentRevision: (idOrIdentifier: string, key: string, revisionId: string) =>
+  restoreDocumentRevision: (idOrIdentifier: string, key: string, revisionId: string, baseRevisionId: string | null) =>
     api.post<{
       document: CaseDocument & { key: string; body: string };
       revision: CaseDocumentRevision;
       restoredFromRevisionId: string;
       restoredFromRevisionNumber: number;
-    }>(`/cases/${idOrIdentifier}/documents/${encodeURIComponent(key)}/revisions/${revisionId}/restore`, {}),
+    }>(`/cases/${idOrIdentifier}/documents/${encodeURIComponent(key)}/revisions/${revisionId}/restore`, { baseRevisionId }),
   deleteDocument: (idOrIdentifier: string, key: string) =>
     api.delete<{ ok: true }>(`/cases/${idOrIdentifier}/documents/${encodeURIComponent(key)}`),
   listRevisions: (idOrIdentifier: string, key: string) =>
