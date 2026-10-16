@@ -13,6 +13,8 @@ SERVER_FILES=(
   middleware/auth.ts
   middleware/comment-only-key.ts
   routes/issues.ts
+  routes/cases.ts
+  slashbin/protected-cases.ts
 )
 
 out="${1:?usage: server-overlay.sh <out-dir>}"
