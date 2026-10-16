@@ -232,6 +232,7 @@ import {
   unprocessable,
 } from "../errors.js";
 import { privateJsonEtag } from "../middleware/private-json-etag.js";
+import { creditedCommentAuthor, creditedCommentAuthorType } from "../middleware/comment-author.js";
 import { createRequestPromiseMemo } from "../lib/request-promise-memo.js";
 import {
   assertBoard,
@@ -13688,13 +13689,13 @@ export function issueRoutes(
               transactionalComment = await svc.addComment(
                 id,
                 commentBody,
-                {
+                creditedCommentAuthor(req, existing.companyId, {
                   agentId: actor.agentId ?? undefined,
                   userId:
                     actor.actorType === "user" ? actor.actorId : undefined,
                   runId: actor.runId,
                   onBehalfOfUserId: authenticatedActorResponsibleUserId(req),
-                },
+                }),
                 {
                   attachmentIds: commentAttachmentIds,
                   clientRequestId: actor.actorType === "user" ? commentClientRequestId : undefined,
@@ -14295,12 +14296,12 @@ export function issueRoutes(
         comment ??= await svc.addComment(
           id,
           commentBody,
-          {
+          creditedCommentAuthor(req, existing.companyId, {
             agentId: actor.agentId ?? undefined,
             userId: actor.actorType === "user" ? actor.actorId : undefined,
             runId: actor.runId,
             onBehalfOfUserId: authenticatedActorResponsibleUserId(req),
-          },
+          }),
           {
             authorizationReason: issueMutationAuthorizationReason,
             clientRequestId: actor.actorType === "user" ? commentClientRequestId : undefined,
@@ -17651,7 +17652,7 @@ export function issueRoutes(
         const commentOptions = {
           authorType:
             req.body.authorType ??
-            (actor.actorType === "agent" ? "agent" : "user"),
+            creditedCommentAuthorType(req, actor.actorType === "agent" ? "agent" : "user"),
           presentation: commentPresentation,
           metadata: req.body.metadata ?? null,
           attachmentIds: req.body.attachmentIds,
@@ -17670,12 +17671,12 @@ export function issueRoutes(
             const insertedComment = await svc.addComment(
               id,
               req.body.body,
-              {
+              creditedCommentAuthor(req, issue.companyId, {
                 agentId: actor.agentId ?? undefined,
                 userId: actor.actorType === "user" ? actor.actorId : undefined,
                 runId: actor.runId,
                 onBehalfOfUserId: authenticatedActorResponsibleUserId(req),
-              },
+              }),
               {
                 ...commentOptions,
                 authorizationReason: commentAuthorizationReason,
@@ -17764,7 +17765,7 @@ export function issueRoutes(
         const commentOptions = {
           authorType:
             req.body.authorType ??
-            (actor.actorType === "agent" ? "agent" : "user"),
+            creditedCommentAuthorType(req, actor.actorType === "agent" ? "agent" : "user"),
           presentation: commentPresentation,
           metadata: req.body.metadata ?? null,
           attachmentIds: req.body.attachmentIds,
@@ -17777,12 +17778,12 @@ export function issueRoutes(
           svc.addComment(
             id,
             req.body.body,
-            {
+            creditedCommentAuthor(req, issue.companyId, {
               agentId: actor.agentId ?? undefined,
               userId: actor.actorType === "user" ? actor.actorId : undefined,
               runId: actor.runId,
               onBehalfOfUserId: authenticatedActorResponsibleUserId(req),
-            },
+            }),
             commentOptions,
             dbOrTx,
           );
