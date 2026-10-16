@@ -151,6 +151,7 @@ import {
 import { trackAgentTaskCompleted } from "@paperclipai/shared/telemetry";
 import { getTelemetryClient } from "../telemetry.js";
 import { isUniqueViolation } from "../db-errors.js";
+import { assertDeleteKeepsProtectedCases, loadCaseProtection } from "../slashbin/protected-cases.js";
 import type { StorageService } from "../storage/types.js";
 import { validate, validateIssueMutationBody } from "../middleware/validate.js";
 import * as serviceIndex from "../services/index.js";
@@ -3519,6 +3520,8 @@ export function issueRoutes(
 ) {
   const router = Router();
   const svc = issueService(db);
+  // Slashbin (EM#629): deleting a task or label linked to a protected Case needs its editor.
+  const caseProtection = loadCaseProtection();
   const runRedactions = createRunSecretRedactionRegistry(db);
   const access = accessService(db);
   const secretProposals = createSecretProposalsService(db);
@@ -8317,6 +8320,7 @@ export function issueRoutes(
       "Label not found",
     );
     if (!existing) return;
+    await assertDeleteKeepsProtectedCases(db, caseProtection, req, { labelId });
     const removed = await svc.deleteLabel(labelId);
     if (!removed) {
       res.status(404).json({ error: "Label not found" });
@@ -14946,6 +14950,7 @@ export function issueRoutes(
     );
     if (!existing) return;
     if (!(await assertAgentIssueMutationAllowed(req, res, existing))) return;
+    await assertDeleteKeepsProtectedCases(db, caseProtection, req, { issueId: id });
     const attachments = await svc.listAttachments(id);
 
     const issue = await svc.remove(id);

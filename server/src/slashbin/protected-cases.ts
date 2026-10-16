@@ -1,6 +1,7 @@
 // Slashbin patch (EM#629): protected Cases. Company policy lives in Cases, and
 // upstream lets any company member write any Case. This module decides who may
-// write a protected Case; routes/cases.ts calls it before every Case write.
+// write a protected Case; routes/cases.ts calls it before every Case write, and the
+// task, label and project delete routes call it for the Cases a delete would unlink.
 //
 // Which Cases are protected is fixed here, not in config: every Case whose type
 // is in PROTECTED_CASE_TYPES, plus Case ids the config names. Removing the config
@@ -23,6 +24,8 @@
 // neither credential is on the list. Config that is set but invalid refuses
 // every Case write (503) until it is fixed; reads are never gated here.
 import type { Request } from "express";
+import { eq } from "drizzle-orm";
+import { caseIssueLinks, caseLabels, cases, type Db } from "@paperclipai/db";
 import { HttpError, conflict, forbidden, unprocessable } from "../errors.js";
 
 export const PROTECTED_CASE_TYPES: readonly string[] = ["company-policy"];
@@ -185,4 +188,34 @@ export function assertRestoreBase(
       },
     );
   }
+}
+
+/** Reads PAPERCLIP_PROTECTED_CASES; routers call it once, at boot, like routes/cases.ts. */
+export function loadCaseProtection(): CaseProtection {
+  return parseCaseProtection(process.env[PROTECTED_CASES_ENV]);
+}
+
+/**
+ * Deleting a task, label or project removes its link to every Case that holds it
+ * (ON DELETE CASCADE / SET NULL), with no Case route involved. Where one of those
+ * Cases is protected, the delete is a change to the policy container and needs
+ * that Case's editor.
+ */
+export async function assertDeleteKeepsProtectedCases(
+  db: Db,
+  protection: CaseProtection,
+  req: Request,
+  target: { issueId: string } | { labelId: string } | { projectId: string },
+) {
+  const caseCols = { id: cases.id, caseType: cases.caseType };
+  const held = "issueId" in target
+    ? await db.select(caseCols).from(caseIssueLinks)
+      .innerJoin(cases, eq(caseIssueLinks.caseId, cases.id))
+      .where(eq(caseIssueLinks.issueId, target.issueId))
+    : "labelId" in target
+      ? await db.select(caseCols).from(caseLabels)
+        .innerJoin(cases, eq(caseLabels.caseId, cases.id))
+        .where(eq(caseLabels.labelId, target.labelId))
+      : await db.select(caseCols).from(cases).where(eq(cases.projectId, target.projectId));
+  for (const row of held) assertCaseWritable(protection, req, row);
 }

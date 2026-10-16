@@ -33,6 +33,8 @@ import {
 } from "./helpers/embedded-postgres.js";
 import { errorHandler } from "../middleware/error-handler.js";
 import { caseRoutes } from "../routes/cases.js";
+import { issueRoutes } from "../routes/issues.js";
+import { projectRoutes } from "../routes/projects.js";
 import { companyService } from "../services/companies.js";
 import { instanceSettingsService } from "../services/instance-settings.js";
 import { PROTECTED_CASES_ENV, parseCaseProtection } from "../slashbin/protected-cases.js";
@@ -368,6 +370,46 @@ describeEmbeddedPostgres("protected cases routes", () => {
     await intruder.patch(`/api/cases/${childId}`).send({ summary: "still mine" }).expect(200);
     // The editor can move it out.
     await editor.patch(`/api/cases/${childId}`).send({ parentCaseId: null }).expect(200);
+  });
+
+  it("needs a protected Case's editor to delete the task, label or project it holds", async () => {
+    const s = await seed();
+    const companyId = s.policy.companyId;
+    const [task] = await db.insert(issues).values({ companyId, title: "Policy task", status: "todo" }).returning();
+    await db.insert(caseIssueLinks).values({ companyId, caseId: s.policy.id, issueId: task!.id, role: "work" });
+    const [label] = await db.insert(labels).values({ companyId, name: "policy", color: "#000000" }).returning();
+    await db.insert(caseLabels).values({ companyId, caseId: s.policy.id, labelId: label!.id });
+    const [loose] = await db.insert(labels).values({ companyId, name: "loose", color: "#ffffff" }).returning();
+    const [project] = await db.insert(projects).values({ companyId, name: "Policy project" }).returning();
+    await db.update(cases).set({ projectId: project!.id }).where(eq(cases.id, s.policy.id));
+
+    // Built after the env is set, as at boot.
+    const deleter = (actor: Actor) => {
+      process.env[PROTECTED_CASES_ENV] = s.config;
+      const instance = express();
+      instance.use(express.json());
+      instance.use((req, _res, next) => {
+        req.actor = actor;
+        next();
+      });
+      instance.use("/api", issueRoutes(db, storage));
+      instance.use("/api", projectRoutes(db));
+      instance.use(errorHandler);
+      return request(instance);
+    };
+    const intruder = deleter(s.actors.rayBoardKey);
+    for (const path of [`/api/issues/${task!.id}`, `/api/labels/${label!.id}`, `/api/projects/${project!.id}`]) {
+      const res = await intruder.delete(path);
+      expect(res.status, path).toBe(403);
+      expect(res.body.details?.code ?? res.body.code, path).toBe("case_protected");
+    }
+    expect(await db.select().from(caseIssueLinks).where(eq(caseIssueLinks.issueId, task!.id))).toHaveLength(1);
+    expect(await db.select().from(caseLabels).where(eq(caseLabels.labelId, label!.id))).toHaveLength(1);
+    const [policy] = await db.select().from(cases).where(eq(cases.id, s.policy.id));
+    expect(policy!.projectId).toBe(project!.id);
+    // A label no protected Case holds is still anyone's to delete; the editor may delete the held one.
+    await intruder.delete(`/api/labels/${loose!.id}`).expect(200);
+    await deleter(s.actors.raySession).delete(`/api/labels/${label!.id}`).expect(200);
   });
 
   it("tells the Case page which Cases are protected", async () => {
