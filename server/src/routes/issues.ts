@@ -13463,17 +13463,33 @@ export function issueRoutes(
         });
         const runToStopForReassignment = await resolveActiveIssueRun(existing);
         if (runToStopForReassignment) {
+          // slashbin (EM#625): a bridged (`process`) seat handing its own card on
+          // from inside its own run has finished that run; settle it as succeeded,
+          // so the board neither reads delivered work as cancelled nor holds the
+          // card for replay. Board, cross-agent and other-adapter stops keep the
+          // cancellation below.
+          const selfHandoff = actor.actorType === "agent" && !!actor.agentId &&
+            actor.agentId === existing.assigneeAgentId &&
+            actor.runId === runToStopForReassignment.id &&
+            (await agentsSvc.getById(actor.agentId))?.adapterType === "process";
           const cancelled = await heartbeat.cancelRun(
             runToStopForReassignment.id,
-            "Cancelled before issue reassignment",
-            {
-              errorCode: "issue_reassigned",
-              resultJson: { reassignmentStopConfirmed: true, issueMutationStopId },
-              eventMessage: "run cancelled before issue reassignment",
-              eventPayload: { issueId: existing.id },
-            },
+            selfHandoff ? "Completed by handing the issue on" : "Cancelled before issue reassignment",
+            selfHandoff
+              ? {
+                  settleAs: "succeeded",
+                  resultJson: { reassignmentStopConfirmed: true, issueMutationStopId, selfHandoff: true },
+                  eventMessage: "run completed by handing the issue on",
+                  eventPayload: { issueId: existing.id },
+                }
+              : {
+                  errorCode: "issue_reassigned",
+                  resultJson: { reassignmentStopConfirmed: true, issueMutationStopId },
+                  eventMessage: "run cancelled before issue reassignment",
+                  eventPayload: { issueId: existing.id },
+                },
           );
-          if (!cancelled || cancelled.status !== "cancelled") {
+          if (!cancelled || cancelled.status !== (selfHandoff ? "succeeded" : "cancelled")) {
             throw conflict(
               "The active agent run could not be stopped before reassignment",
               {

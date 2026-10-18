@@ -14330,6 +14330,16 @@ export function heartbeatService(
       return { outcome: "satisfied" as const, queuedRun: null };
     }
 
+    // slashbin: a self-handoff gave the card away; never wake the giver to comment.
+    if (parseObject(run.resultJson).selfHandoff === true) {
+      await patchRunIssueCommentStatus(run.id, {
+        issueCommentStatus: "not_applicable",
+        issueCommentSatisfiedByCommentId: null,
+        issueCommentRetryQueuedAt: null,
+      });
+      return { outcome: "not_applicable" as const, queuedRun: null };
+    }
+
     // Missing-comment recovery is a legacy compatibility path for otherwise
     // successful runs. A failed, timed-out, or cancelled run is already owned
     // by lifecycle recovery and its terminal system presentation. Queuing a
@@ -25408,7 +25418,8 @@ export function heartbeatService(
           // likewise keeps the provider session, logs, and usage after Stop wins.
           if (
             (adapterResult.nativeFinalization ||
-              (processCancellation && !processCancellation.failed && status === "cancelled")) &&
+              (processCancellation && !processCancellation.failed &&
+                (status === "cancelled" || (status === "succeeded" && latestRun?.resultJson?.selfHandoff === true)))) &&
             persistedRunWrite.run?.status === status
           ) {
             persistedRun = await db
@@ -28484,7 +28495,9 @@ export function heartbeatService(
             issue.assigneeAgentId === agentId && interruptedRunId && isUuidLike(interruptedRunId)
               ? await tx.select({ agentId: heartbeatRuns.agentId }).from(heartbeatRuns).where(and(
                   eq(heartbeatRuns.id, interruptedRunId), eq(heartbeatRuns.companyId, issue.companyId),
-                  eq(heartbeatRuns.status, "cancelled"), eq(heartbeatRuns.errorCode, "issue_reassigned"),
+                  or(and(eq(heartbeatRuns.status, "cancelled"), eq(heartbeatRuns.errorCode, "issue_reassigned")),
+                    // slashbin: a self-handoff settles its giver as succeeded.
+                    and(eq(heartbeatRuns.status, "succeeded"), sql`${heartbeatRuns.resultJson}->>'selfHandoff' = 'true'`)),
                   ne(heartbeatRuns.agentId, agentId),
                   sql`${heartbeatRuns.contextSnapshot}->>'issueId' = ${issue.id}`,
                   or(isNull(heartbeatRuns.nativeIssueId), eq(heartbeatRuns.nativeIssueId, issue.id)),
@@ -29294,6 +29307,12 @@ export function heartbeatService(
     terminationGraceMs?: number;
     /** Caller is immediately scheduling an explicit successor path. */
     suppressImmediateRecovery?: boolean;
+    /**
+     * slashbin: settle the stopped run as succeeded instead of cancelled. Only
+     * for a run that ended itself by handing its card on (selfHandoff): its last
+     * provider action is the committing request, so nothing is left to replay.
+     */
+    settleAs?: "succeeded";
   };
 
   function cancellationTerminationGraceMs(
@@ -29336,7 +29355,9 @@ export function heartbeatService(
     )
       return run;
     const agent = await getAgent(run.agentId);
-    const errorCode = options.errorCode ?? "cancelled";
+    const settleOutcome = options.settleAs ?? "cancelled";
+    const settledOk = settleOutcome === "succeeded";
+    const errorCode = settledOk ? null : (options.errorCode ?? "cancelled");
 
     const pendingProcessCancellation = processRunCancellationSettlements.get(
       run.id,
@@ -29381,10 +29402,10 @@ export function heartbeatService(
     }
     const resultJson = agent
       ? {
-          ...mergeRunStopMetadataForAgent(agent, "cancelled", {
+          ...mergeRunStopMetadataForAgent(agent, settleOutcome, {
             resultJson: parseObject(run.resultJson),
             errorCode,
-            errorMessage: reason,
+            errorMessage: settledOk ? null : reason,
           }),
           ...(options.resultJson ?? {}),
         }
@@ -29504,13 +29525,13 @@ export function heartbeatService(
               : {};
           return await setRunStatusFromLive(
             run.id,
-            "cancelled",
+            settleOutcome,
             pendingNativeRetry
               ? [...CANCELLABLE_HEARTBEAT_RUN_STATUSES, "failed"]
               : [...CANCELLABLE_HEARTBEAT_RUN_STATUSES],
             {
               finishedAt,
-              error: reason,
+              error: settledOk ? null : reason,
               errorCode,
               ...(resultJson ||
               Object.keys(persistedCancellationResult).length > 0
@@ -29525,12 +29546,12 @@ export function heartbeatService(
                         (Number.isInteger(running.child.pid) && (running.child.pid ?? 0) > 0) ||
                         (Number.isInteger(running.processGroupId) && (running.processGroupId ?? 0) > 0)
                       )
-                        ? mergeRunStopMetadataForAgent(agent, "cancelled", {
+                        ? mergeRunStopMetadataForAgent(agent, settleOutcome, {
                             resultJson: {
                               ...resultJson,
                               executionCancellation: { state: "acknowledged", acknowledgedAt: finishedAt.toISOString() },
                             },
-                            errorCode, errorMessage: reason,
+                            errorCode, errorMessage: settledOk ? null : reason,
                           })
                         : {}),
                       // The native cancellation helper may have advanced a durable
@@ -29581,21 +29602,21 @@ export function heartbeatService(
       const cancelled = cancellation.run;
 
       if (cancellation.updated && cancelled) {
-        await setWakeupStatus(run.wakeupRequestId, "cancelled", {
+        await setWakeupStatus(run.wakeupRequestId, settledOk ? "completed" : "cancelled", {
           finishedAt: cancelled.finishedAt ?? new Date(),
-          error: reason,
+          error: settledOk ? null : reason,
         });
         await appendRunEvent(cancelled, {
           eventType: "lifecycle",
           stream: "system",
-          level: "warn",
+          level: settledOk ? "info" : "warn",
           message: options.eventMessage ?? "run cancelled",
           ...(options.eventPayload ? { payload: options.eventPayload } : {}),
         });
         await releaseIssueExecutionAndPromote(cancelled, {
           suppressImmediateRecovery: options.suppressImmediateRecovery,
         });
-        await finalizeAgentStatus(run.agentId, "cancelled", undefined, {
+        await finalizeAgentStatus(run.agentId, settleOutcome, undefined, {
           wasFirstHeartbeat: timerClaimWasFirstHeartbeat(run),
         });
         await startNextQueuedRunForAgent(run.agentId);
