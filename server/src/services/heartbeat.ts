@@ -25360,11 +25360,16 @@ export function heartbeatService(
               } as Record<string, unknown>)
             : null;
 
+        // slashbin (EM#625): a run settled succeeded by handing its own card on
+        // keeps its hand-on markers through this finalization; receiver
+        // admission reads them to recognize the giver as the handoff source.
+        const selfHandoffSettled = latestRun?.status === "succeeded" &&
+          parseObject(latestRun.resultJson).selfHandoff === true;
         const persistedResultJson = mergeHeartbeatRunResultJson(
           mergeRunStopMetadataForAgent(agent, outcome, {
             resultJson: mergeAdapterRecoveryMetadata({
               resultJson: {
-                ...(adapterResult.nativeFinalization || outcome === "cancelled"
+                ...(adapterResult.nativeFinalization || outcome === "cancelled" || selfHandoffSettled
                   ? parseObject(latestRun?.resultJson)
                   : {}),
                 ...parseObject(adapterResult.resultJson),
@@ -25372,6 +25377,13 @@ export function heartbeatService(
                   ? { executionRecovery: adapterResult.executionRecovery }
                   : {}),
                 configFreshness: configFreshnessResultMetadata,
+                ...(selfHandoffSettled
+                  ? {
+                      selfHandoff: true,
+                      reassignmentStopConfirmed: latestRun?.resultJson?.reassignmentStopConfirmed,
+                      issueMutationStopId: latestRun?.resultJson?.issueMutationStopId,
+                    }
+                  : {}),
               },
               errorFamily: adapterResult.errorFamily ?? null,
               retryNotBefore: adapterResult.retryNotBefore ?? null,
@@ -25418,8 +25430,10 @@ export function heartbeatService(
           // likewise keeps the provider session, logs, and usage after Stop wins.
           if (
             (adapterResult.nativeFinalization ||
-              (processCancellation && !processCancellation.failed &&
-                (status === "cancelled" || (status === "succeeded" && latestRun?.resultJson?.selfHandoff === true)))) &&
+              (processCancellation && !processCancellation.failed && status === "cancelled") ||
+              // The hand-on's stop may finish (and leave the settlement map)
+              // before this executor reads it; the settled outcome is the proof.
+              (selfHandoffSettled && status === "succeeded" && !processCancellation?.failed)) &&
             persistedRunWrite.run?.status === status
           ) {
             persistedRun = await db

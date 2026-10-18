@@ -7,10 +7,11 @@ import { randomUUID } from "node:crypto";
 import express from "express";
 import request from "supertest";
 import { eq, sql } from "drizzle-orm";
-import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import {
   agentWakeupRequests,
   agents,
+  authUsers,
   companies,
   companyMemberships,
   createDb,
@@ -181,5 +182,68 @@ describeEmbeddedPostgres("slashbin self-handoff run accounting", () => {
     const out = await handOn(s, { kind: "other" });
     expect(out.run.status).toBe("cancelled");
     expect(out.run.errorCode).toBe("issue_reassigned");
+  });
+  // Review R1: the giver's own executor finishes after the stop. Its late
+  // finalization must keep the hand-on markers, so a later receiver admission
+  // still recognizes the giver as the handoff source and adopts its queued input.
+  it("keeps the hand-on markers through the giver's real executor completion", async () => {
+    // A real run acts for the company's responsible user; that user must exist.
+    await db.insert(authUsers).values({ id: "operator", name: "Operator", email: "operator@example.test", createdAt: new Date(), updatedAt: new Date() })
+      .onConflictDoNothing();
+    const s = await seed("process");
+    // Drop the fixture's hand-made run; let the real executor run the giver.
+    runningProcesses.delete(s.runId);
+    children.get(s.runId)!.kill();
+    children.delete(s.runId);
+    await db.update(issues).set({ executionRunId: null, executionLockedAt: null, executionAgentNameKey: null, status: "todo" })
+      .where(eq(issues.id, s.issueId));
+    await db.update(heartbeatRuns).set({ status: "cancelled", finishedAt: new Date() }).where(eq(heartbeatRuns.id, s.runId));
+    await db.update(agents).set({ adapterConfig: { command: process.execPath, args: ["-e", "setInterval(() => {}, 1000)"] } })
+      .where(eq(agents.id, s.giverId));
+    const heartbeat = heartbeatService(db);
+    const giverRun = await heartbeat.wakeup(s.giverId, {
+      source: "assignment", triggerDetail: "system", reason: "issue_assigned",
+      payload: { issueId: s.issueId }, contextSnapshot: { issueId: s.issueId, taskId: s.issueId, wakeReason: "issue_assigned" },
+    });
+    await vi.waitFor(async () => {
+      const [issue] = await db.select().from(issues).where(eq(issues.id, s.issueId));
+      expect(issue!.executionRunId).toBe(giverRun!.id);
+      expect(runningProcesses.has(giverRun!.id)).toBe(true);
+    }, { timeout: 20_000, interval: 100 });
+    const res = await request(app(s.companyId, { agentId: s.giverId, runId: giverRun!.id })).patch(`/api/issues/${s.issueId}`)
+      .send({ assigneeAgentId: s.receiverId, comment: "Here is the answer." });
+    expect(res.status, JSON.stringify(res.body)).toBe(200);
+    await drainHeartbeatRunsToQuiescence(db, heartbeat);
+    const [run] = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, giverRun!.id));
+    expect(run!.status).toBe("succeeded");
+    expect(run!.errorCode).toBeNull();
+    // The executor's own finalization ran (it writes configFreshness and the presentation decision).
+    expect(run!.resultJson).toHaveProperty("configFreshness");
+    expect(run!.resultJson).toHaveProperty("presentationDecision");
+    expect(run!.resultJson).toMatchObject({ selfHandoff: true, reassignmentStopConfirmed: true });
+    expect(typeof run!.resultJson?.issueMutationStopId).toBe("string");
+    expect(await db.select().from(issueRecoveryActions).where(eq(issueRecoveryActions.sourceIssueId, s.issueId))).toHaveLength(0);
+
+    const [pending] = await db.insert(issueComments).values({
+      companyId: s.companyId, issueId: s.issueId, authorType: "user", authorUserId: "operator", body: "One more thing",
+    }).returning();
+    await db.insert(agentWakeupRequests).values({
+      companyId: s.companyId, agentId: s.giverId, source: "automation", reason: "issue_execution_deferred", status: "deferred_issue_execution",
+      payload: { issueId: s.issueId, commentId: pending!.id, _paperclipWakeContext: { issueId: s.issueId, wakeReason: "issue_commented", wakeCommentIds: [pending!.id] } },
+    });
+    // The first receiver has just been woken (re-wakes are throttled), so a
+    // fresh seat takes the card: its admission is the one after completion.
+    const lateReceiverId = randomUUID();
+    await db.insert(agents).values({
+      id: lateReceiverId, companyId: s.companyId, name: "Late Receiver", role: "engineer", status: "idle", adapterType: "process",
+      adapterConfig: { command: process.execPath, args: ["-e", ""] }, runtimeConfig: {}, permissions: { canCreateAgents: false, canAssignTasks: true },
+    });
+    await db.update(issues).set({ assigneeAgentId: lateReceiverId }).where(eq(issues.id, s.issueId));
+    const next = await heartbeat.wakeup(lateReceiverId, {
+      source: "assignment", triggerDetail: "system", reason: "issue_assigned",
+      payload: { issueId: s.issueId },
+      contextSnapshot: { issueId: s.issueId, taskId: s.issueId, wakeReason: "issue_assigned", interruptedRunId: giverRun!.id },
+    });
+    expect(next?.contextSnapshot?.wakeCommentIds).toEqual([pending!.id]);
   });
 });
