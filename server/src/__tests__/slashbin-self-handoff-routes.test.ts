@@ -21,6 +21,7 @@ import {
   issues,
 } from "@paperclipai/db";
 import { runningProcesses } from "../adapters/index.js";
+import { agentRunWritesRevoked, assertAgentRunWriteAllowed } from "../agent-run-cancellation.js";
 import { errorHandler } from "../middleware/index.js";
 import { issueRoutes } from "../routes/issues.js";
 import { heartbeatService } from "../services/heartbeat.js";
@@ -245,5 +246,50 @@ describeEmbeddedPostgres("slashbin self-handoff run accounting", () => {
       contextSnapshot: { issueId: s.issueId, taskId: s.issueId, wakeReason: "issue_assigned", interruptedRunId: giverRun!.id },
     });
     expect(next?.contextSnapshot?.wakeCommentIds).toEqual([pending!.id]);
+  });
+  // Review round 2, R1: succeeded must not hand the giver back its write
+  // authority. Only the originating hand-on mutation (its stop id) may commit.
+  it("revokes every giver write after a self-handoff except the originating mutation", async () => {
+    const s = await seed("process");
+    const out = await handOn(s, { kind: "giver" });
+    expect(out.run.status).toBe("succeeded");
+    expect(agentRunWritesRevoked(out.run)).toBe(true);
+    const late = await request(app(s.companyId, { agentId: s.giverId, runId: s.runId })).patch(`/api/issues/${s.issueId}`)
+      .send({ status: "done" });
+    // Refused: the request middleware (agentRunWritesRevoked) or the receiver's lock stops it first.
+    expect([403, 409], JSON.stringify(late.body)).toContain(late.status);
+    const [issue] = await db.select().from(issues).where(eq(issues.id, s.issueId));
+    expect(issue!.status).not.toBe("done");
+    expect(issue!.assigneeAgentId).toBe(s.receiverId);
+    const stopId = out.run.resultJson!.issueMutationStopId as string;
+    await db.transaction(async (tx) => {
+      await expect(assertAgentRunWriteAllowed(tx as any, s.companyId, { agentId: s.giverId, runId: s.runId }))
+        .rejects.toMatchObject({ status: 403 });
+      await expect(assertAgentRunWriteAllowed(tx as any, s.companyId, { agentId: s.giverId, runId: s.runId, stopId: randomUUID() }))
+        .rejects.toMatchObject({ status: 403 });
+      await expect(assertAgentRunWriteAllowed(tx as any, s.companyId, { agentId: s.giverId, runId: s.runId, stopId }))
+        .resolves.toBeUndefined();
+    });
+  });
+
+  // Review round 2, R2: a comment deferred to the giver before the hand-on
+  // reaches the receiver; the giver's settlement must not start a new giver run.
+  it("delivers a comment deferred before the hand-on to the receiver, never a new giver run", async () => {
+    await db.insert(authUsers).values({ id: "operator", name: "Operator", email: "operator@example.test", createdAt: new Date(), updatedAt: new Date() })
+      .onConflictDoNothing();
+    const s = await seed("process");
+    const [pending] = await db.insert(issueComments).values({
+      companyId: s.companyId, issueId: s.issueId, authorType: "user", authorUserId: "operator", body: "One more thing",
+    }).returning();
+    await db.insert(agentWakeupRequests).values({
+      companyId: s.companyId, agentId: s.giverId, source: "automation", reason: "issue_execution_deferred", status: "deferred_issue_execution",
+      payload: { issueId: s.issueId, commentId: pending!.id, _paperclipWakeContext: { issueId: s.issueId, wakeReason: "issue_commented", wakeCommentIds: [pending!.id] } },
+    });
+    const out = await handOn(s, { kind: "giver" });
+    expect(out.run.status).toBe("succeeded");
+    const giverRuns = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.agentId, s.giverId));
+    expect(giverRuns.map((r) => r.id)).toEqual([s.runId]);
+    const receiverRuns = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.agentId, s.receiverId));
+    expect(receiverRuns.some((r) => (r.contextSnapshot?.wakeCommentIds as string[] | undefined)?.includes(pending!.id))).toBe(true);
   });
 });
