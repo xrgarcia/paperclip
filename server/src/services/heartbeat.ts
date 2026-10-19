@@ -34,7 +34,7 @@ import { admitExplicitNativeContinuation, undeliveredLegacyUserCommentIds } from
 import { connectionIntentService } from "./connection-intents.js";
 import { managedAiSessionFingerprintConfig, prepareManagedAiRuntime, assertManagedAiProjectAuth, stripAiAuthBindings, isAiConnectionBusy, AI_AUTH_ENV_KEYS } from "./ai-connection-runtime.js";
 import { aiConnectionBindingSchema } from "@paperclipai/shared";
-import { executionBlockerPredicate, getExecutionBlocker } from "./execution-blocker.js";
+import { executionBlockerPredicate, getExecutionBlocker, handedOnHoldRunId } from "./execution-blocker.js";
 import { CONVERSATION_CONTINUATION_POLICY, claimedAdapterType, runUsedConversationAdapter, hasConversationContinuationPolicy, isConversationAdapter } from "./conversation-continuation.js";
 import { recordExecutionWait } from "./execution-wait.js";
 import { getNativeReviewAssignment, readNativeReviewAssignmentContext } from "./native-runtime/native-review-participant.js";
@@ -19549,6 +19549,18 @@ export function heartbeatService(
       await db.update(agentWakeupRequests).set({ updatedAt: new Date() }).where(and(
         eq(agentWakeupRequests.id, wake.id), eq(agentWakeupRequests.status, "deferred_issue_execution"),
       ));
+      // slashbin (EM#625): an owner who never ran here (or whose only run was
+      // refused at admission) gets their saved input from the release of the
+      // previous owner's run whose hold was handed on.
+      const neverRan = !latest || (latest.status === "cancelled" && !latest.startedAt &&
+        latest.errorCode === "execution_reconciliation_required");
+      const handedRunId = neverRan && !await getExecutionBlocker(db, wake.companyId, String(wake.payload?.issueId))
+        ? await handedOnHoldRunId(db, wake.companyId, String(wake.payload?.issueId)) : null;
+      if (handedRunId) {
+        await releaseIssueExecutionAndPromote({ id: handedRunId, companyId: wake.companyId }, { suppressImmediateRecovery: true })
+          .catch(err => { logger.warn({ err, queueId: wake.id }, "failed to promote handed-on saved input"); });
+        continue;
+      }
       if (!latest || latest.runtimeMode !== "legacy" || !isHeartbeatRunTerminalStatus(latest.status)) continue;
       const cancelledAdmission = latest.status === "cancelled" && !latest.startedAt &&
         latest.errorCode === "execution_reconciliation_required";

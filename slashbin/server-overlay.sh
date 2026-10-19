@@ -24,6 +24,7 @@ SERVER_FILES=(
   agent-run-cancellation.ts
   modules/wake-queue/adapters/postgres.ts
   services/recovery/service.ts
+  services/execution-blocker.ts
 )
 
 out="${1:?usage: server-overlay.sh <out-dir>}"

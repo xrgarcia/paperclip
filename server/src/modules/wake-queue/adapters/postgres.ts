@@ -3,7 +3,7 @@ import { isAcknowledgedNativeReassignmentStop, isAcknowledgedNativeStop } from "
 import { isCompletedOnboardingHandoffWake } from "../../../services/chat-completion-delivery.js";
 import { instanceSettingsService } from "../../../services/instance-settings.js";
 import { currentConversationCommentCondition } from "../../../services/agent-conversations.js";
-import { getExecutionBlocker } from "../../../services/execution-blocker.js";
+import { getExecutionBlocker, handedOnHoldRunId } from "../../../services/execution-blocker.js";
 import { and, asc, eq, inArray, isNull, notInArray, or, sql } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
 import { extractIssueReferenceIdentifiers } from "@paperclipai/shared";
@@ -1097,6 +1097,11 @@ export function createPostgresWakeQueueAdapter(db: Db, deps: WakeQueuePostgresAd
               sql`${agentWakeupRequests.payload}->>'issueId' = ${issueRow.id}`,
             )).limit(1)
           : [];
+        // slashbin (EM#625): once its hold is handed on, the old owner's reassignment-stopped
+        // run drains the new owner's saved input; the drain still checks every blocker.
+        const handedOn = Boolean(issueRow && issueRow.assigneeAgentId !== run.agentId &&
+          run.status === "cancelled" && run.errorCode === "issue_reassigned" &&
+          await handedOnHoldRunId(tx, run.companyId, issueRow.id) === run.id);
         const preDrainFacts: PreDrainFacts = {
           issueRowPresent: issueRow !== null,
           executionRunIdMatchesRun: !issueRow || !issueRow.executionRunId || issueRow.executionRunId === run.id,
@@ -1105,17 +1110,18 @@ export function createPostgresWakeQueueAdapter(db: Db, deps: WakeQueuePostgresAd
           issueStatus: issueRow?.status ?? "",
           hasAssigneeUser: Boolean(issueRow?.assigneeUserId),
           assigneeAgentMatchesRunAgent: issueRow?.assigneeAgentId === run.agentId,
-          legacyExecutionNeedsReconciliation: legacyExecutionNeedsReconciliation(run),
+          legacyExecutionNeedsReconciliation: legacyExecutionNeedsReconciliation(run) && !handedOn,
           // An operator stop never promotes old queued work by itself. The
           // next explicit wake adopts those messages atomically when it
           // queues a run.
-          executionCancellationAcknowledged:
+          // A reassignment stop is not an operator Stop: once handed on, it does not hold the new owner's input.
+          executionCancellationAcknowledged: !handedOn && (
             isAcknowledgedNativeReassignmentStop(run) ||
             // slashbin (EM#625): a self-handoff settles succeeded; its input waits for the receiver.
             isAcknowledgedSelfHandoffStop(run) ||
             (run.status === "cancelled" &&
             (parseObject(run.resultJson?.executionCancellation).state === "acknowledged" || isAcknowledgedNativeStop(run)) &&
-            !interruptedQueue),
+            !interruptedQueue)),
         };
         const preDrain = decidePreDrain(preDrainFacts);
 
