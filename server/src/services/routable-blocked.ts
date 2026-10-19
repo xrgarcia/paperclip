@@ -1,5 +1,7 @@
-import { and, eq, isNotNull, isNull, sql } from "drizzle-orm";
-import { issues, type Db } from "@paperclipai/db";
+import { and, asc, eq, isNull, notInArray, sql } from "drizzle-orm";
+import { issueRecoveryActions, issues, type Db } from "@paperclipai/db";
+import { logger } from "../middleware/logger.js";
+import { executionBlockerPredicate, getExecutionBlocker } from "./execution-blocker.js";
 import type { IssueUnblockDescriptor } from "@paperclipai/shared";
 
 export const ROUTABLE_BLOCKED_ROLLOUT_AT = new Date("2026-07-23T18:13:03.000Z");
@@ -77,6 +79,12 @@ export function staleBlockedOwner(
   return { agentId: owner.agentId, since };
 }
 
+// Cards a sweep passed over (behind a recovery hold, or a wake that started no
+// run), with when: kept out of later batches for one window so they neither
+// starve the cards behind them nor get retried every minute. Per process; a
+// restart costs at most one more attempt each.
+const passedOver = new Map<string, number>();
+
 export async function rewakeStaleBlockedOwners(
   db: Db,
   wake: (agentId: string, options: {
@@ -93,7 +101,10 @@ export async function rewakeStaleBlockedOwners(
   now = new Date(),
 ) {
   if (hours <= 0) return 0;
-  const cutoff = new Date(now.getTime() - hours * 3_600_000);
+  const windowMs = hours * 3_600_000;
+  for (const [id, at] of passedOver) if (now.getTime() - at >= windowMs) passedOver.delete(id);
+  const cutoff = new Date(now.getTime() - windowMs);
+  const since = sql`coalesce(${issues.blockedOwnerNotifiedAt}, ${issues.blockedTransitionAt}, ${issues.updatedAt})`;
   const rows = await db
     .select({
       id: issues.id,
@@ -111,15 +122,28 @@ export async function rewakeStaleBlockedOwners(
         eq(issues.status, "blocked"),
         isNull(issues.hiddenAt),
         isNull(issues.executionRunId),
-        isNotNull(issues.unblockDescriptor),
-        sql`coalesce(${issues.blockedOwnerNotifiedAt}, ${issues.blockedTransitionAt}, ${issues.updatedAt}) < ${cutoff.toISOString()}::timestamptz`,
+        // Only agent-owned cards take a batch slot: board and user owners are never woken here.
+        sql`${issues.unblockDescriptor}->'owner'->>'agentId' is not null`,
+        sql`${since} < ${cutoff.toISOString()}::timestamptz`,
+        // A card behind a recovery hold waits on its reconciliation, which the
+        // board performs; deliverReconciledExecutions then wakes the owner with
+        // an authorized continuation. A system wake cannot pass the hold
+        // (admitExplicitNativeContinuation admits users only), so it is not tried.
+        sql`not exists (select 1 from ${issueRecoveryActions} where ${issueRecoveryActions.companyId} = ${issues.companyId} and ${issueRecoveryActions.sourceIssueId} = ${issues.id} and ${executionBlockerPredicate()})`,
+        passedOver.size ? notInArray(issues.id, [...passedOver.keys()]) : undefined,
       ),
     )
+    .orderBy(asc(since))
     .limit(25);
   let woken = 0;
   for (const issue of rows) {
     const stale = staleBlockedOwner(issue, now, hours);
     if (!stale) continue;
+    // A blocker the SQL cannot see (conversation ownership) would only defer the wake.
+    if (await getExecutionBlocker(db, issue.companyId, issue.id)) {
+      passedOver.set(issue.id, now.getTime());
+      continue;
+    }
     // Claim the nudge first: one wake per window, however many sweeps see the card.
     const claimed = await db
       .update(issues)
@@ -136,7 +160,7 @@ export async function rewakeStaleBlockedOwners(
       )
       .returning({ id: issues.id });
     if (!claimed.length) continue;
-    await wake(stale.agentId, {
+    const run = await wake(stale.agentId, {
       source: "automation",
       triggerDetail: "system",
       reason: "issue_unblock_requested",
@@ -146,9 +170,26 @@ export async function rewakeStaleBlockedOwners(
       requestedByActorId: "blocked-owner-rewake",
       contextSnapshot: { wakeReason: "issue_unblock_requested", issueId: issue.id, taskId: issue.id },
     });
-    woken++;
+    if (run) {
+      woken++;
+      continue;
+    }
+    // Deferred or skipped: no run started, so the owner was not notified. Put the
+    // stamp back and pass the card over for a window.
+    await db
+      .update(issues)
+      .set({ blockedOwnerNotifiedAt: issue.blockedOwnerNotifiedAt ?? null })
+      .where(and(eq(issues.companyId, issue.companyId), eq(issues.id, issue.id), eq(issues.blockedOwnerNotifiedAt, now)));
+    passedOver.set(issue.id, now.getTime());
+    logger.warn({ issueId: issue.id, agentId: stale.agentId }, "blocked-owner re-wake started no run; retrying after one window");
   }
   return woken;
+}
+
+/** Test seam: forget the cards earlier sweeps passed over. */
+export function resetBlockedOwnerRewakeState() {
+  passedOver.clear();
+  lastRewakeSweepAt = 0;
 }
 
 /** Hours a blocked card waits before its owning agent is woken again; 0 turns it off. */

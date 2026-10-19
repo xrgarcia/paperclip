@@ -1,12 +1,12 @@
 import { randomUUID } from "node:crypto";
 import { eq } from "drizzle-orm";
-import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
-import { agents, companies, createDb, issues } from "@paperclipai/db";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+import { agents, companies, createDb, issueRecoveryActions, issues } from "@paperclipai/db";
 import {
   getEmbeddedPostgresTestSupport,
   startEmbeddedPostgresTestDatabase,
 } from "./helpers/embedded-postgres.js";
-import { rewakeStaleBlockedOwners } from "../services/routable-blocked.ts";
+import { resetBlockedOwnerRewakeState, rewakeStaleBlockedOwners } from "../services/routable-blocked.ts";
 
 const embeddedPostgresSupport = await getEmbeddedPostgresTestSupport();
 const describeEmbeddedPostgres = embeddedPostgresSupport.supported ? describe : describe.skip;
@@ -28,7 +28,10 @@ describeEmbeddedPostgres("blocked owner re-wake sweep", () => {
     db = createDb(tempDb.connectionString);
   }, 20_000);
 
+  beforeEach(() => resetBlockedOwnerRewakeState());
+
   afterEach(async () => {
+    await db.delete(issueRecoveryActions);
     await db.delete(issues);
     await db.delete(agents);
     await db.delete(companies);
@@ -58,12 +61,12 @@ describeEmbeddedPostgres("blocked owner re-wake sweep", () => {
     const board = card("board", hoursAgo(30), "board");
     const never = card("never notified", null);
     await db.insert(issues).values([stale, fresh, board, never]);
-    return { agentId, stale, fresh, board, never };
+    return { companyId, agentId, card, stale, fresh, board, never };
   }
 
   it("wakes the owner of each stale card once, and leaves fresh and board-owned cards alone", async () => {
     const { agentId, stale, fresh, board, never } = await fixture();
-    const wake = vi.fn(async () => undefined);
+    const wake = vi.fn(async () => ({ id: randomUUID() }));
 
     await expect(rewakeStaleBlockedOwners(db, wake, 4, now)).resolves.toBe(2);
     const woken = wake.mock.calls.map(([who, opts]) => [who, (opts as { payload: { issueId: string } }).payload.issueId]);
@@ -86,5 +89,82 @@ describeEmbeddedPostgres("blocked owner re-wake sweep", () => {
     const wake = vi.fn(async () => undefined);
     await expect(rewakeStaleBlockedOwners(db, wake, 0, now)).resolves.toBe(0);
     expect(wake).not.toHaveBeenCalled();
+  });
+  it("leaves a card behind a recovery hold to the reconciliation, and still wakes the others", async () => {
+    const { companyId, agentId, stale, never } = await fixture();
+    // The shape a SIGTERM-interrupted process-adapter run leaves (legacy-execution-recovery.ts).
+    await db.insert(issueRecoveryActions).values({
+      companyId,
+      sourceIssueId: stale.id,
+      kind: "active_run_watchdog",
+      status: "active",
+      ownerType: "board",
+      returnOwnerAgentId: agentId,
+      cause: "legacy_execution_requires_reconciliation",
+      fingerprint: `legacy-execution:${randomUUID()}`,
+      evidence: { runId: randomUUID() },
+      nextAction: "Inspect the stopped provider and recorded actions, then reconcile their outcomes before continuing.",
+    });
+    const wake = vi.fn(async () => ({ id: randomUUID() }));
+
+    await expect(rewakeStaleBlockedOwners(db, wake, 4, now)).resolves.toBe(1);
+    expect(wake.mock.calls.map(([, o]) => (o as { payload: { issueId: string } }).payload.issueId)).toEqual([never.id]);
+    const [held] = await db.select().from(issues).where(eq(issues.id, stale.id));
+    expect(held.blockedOwnerNotifiedAt?.toISOString()).toBe(stale.blockedOwnerNotifiedAt!.toISOString());
+  });
+
+  it("does not count or stamp a wake that started no run, and does not retry it inside the window", async () => {
+    const { stale } = await fixture();
+    const wake = vi.fn(async () => null);
+
+    await expect(rewakeStaleBlockedOwners(db, wake, 4, now)).resolves.toBe(0);
+    expect(wake).toHaveBeenCalledTimes(2);
+    const [row] = await db.select().from(issues).where(eq(issues.id, stale.id));
+    expect(row.blockedOwnerNotifiedAt?.toISOString()).toBe(stale.blockedOwnerNotifiedAt!.toISOString());
+
+    await expect(rewakeStaleBlockedOwners(db, wake, 4, new Date(now.getTime() + 60_000))).resolves.toBe(0);
+    expect(wake).toHaveBeenCalledTimes(2);
+    // A window later, it is tried again.
+    await rewakeStaleBlockedOwners(db, wake, 4, new Date(now.getTime() + 4 * 3_600_000 + 60_000));
+    expect(wake).toHaveBeenCalledTimes(5); // stale and never again, plus fresh, now past its window too
+  });
+
+  it("reaches an agent-owned card behind more than a batch of older board- and user-owned cards", async () => {
+    const { card, companyId } = await fixture();
+    await db.delete(issues);
+    const excluded = Array.from({ length: 30 }, (_, i) => ({
+      ...card(`board ${i}`, hoursAgo(100), i % 2 ? "board" : ({ userId: randomUUID() } as never)),
+      companyId,
+    }));
+    const target = card("agent-owned", hoursAgo(5));
+    await db.insert(issues).values([...excluded, target]);
+    const wake = vi.fn(async () => ({ id: randomUUID() }));
+
+    await expect(rewakeStaleBlockedOwners(db, wake, 4, now)).resolves.toBe(1);
+    expect((wake.mock.calls[0][1] as { payload: { issueId: string } }).payload.issueId).toBe(target.id);
+  });
+
+  it("pages past more than a batch of held cards to the eligible one", async () => {
+    const { card, companyId, agentId } = await fixture();
+    await db.delete(issues);
+    const held = Array.from({ length: 30 }, (_, i) => card(`held ${i}`, hoursAgo(100)));
+    const target = card("eligible", hoursAgo(5));
+    await db.insert(issues).values([...held, target]);
+    await db.insert(issueRecoveryActions).values(held.map((h) => ({
+      companyId,
+      sourceIssueId: h.id,
+      kind: "active_run_watchdog",
+      status: "active",
+      ownerType: "board",
+      returnOwnerAgentId: agentId,
+      cause: "legacy_execution_requires_reconciliation",
+      fingerprint: `legacy-execution:${h.id}`,
+      evidence: {},
+      nextAction: "Reconcile.",
+    })));
+    const wake = vi.fn(async () => ({ id: randomUUID() }));
+
+    await expect(rewakeStaleBlockedOwners(db, wake, 4, now)).resolves.toBe(1);
+    expect((wake.mock.calls[0][1] as { payload: { issueId: string } }).payload.issueId).toBe(target.id);
   });
 });
