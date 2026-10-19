@@ -21,6 +21,9 @@ SERVER_FILES=(
   services/heartbeat.ts
   services/execution-recovery-resolution.ts
   services/activity-log.ts
+  agent-run-cancellation.ts
+  modules/wake-queue/adapters/postgres.ts
+  services/recovery/service.ts
 )
 
 out="${1:?usage: server-overlay.sh <out-dir>}"

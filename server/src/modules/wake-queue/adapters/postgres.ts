@@ -1,3 +1,4 @@
+import { isAcknowledgedSelfHandoffStop } from "../../../agent-run-cancellation.js";
 import { isAcknowledgedNativeReassignmentStop, isAcknowledgedNativeStop } from "../../../services/acknowledged-native-stop.js";
 import { isCompletedOnboardingHandoffWake } from "../../../services/chat-completion-delivery.js";
 import { instanceSettingsService } from "../../../services/instance-settings.js";
@@ -1110,6 +1111,8 @@ export function createPostgresWakeQueueAdapter(db: Db, deps: WakeQueuePostgresAd
           // queues a run.
           executionCancellationAcknowledged:
             isAcknowledgedNativeReassignmentStop(run) ||
+            // slashbin (EM#625): a self-handoff settles succeeded; its input waits for the receiver.
+            isAcknowledgedSelfHandoffStop(run) ||
             (run.status === "cancelled" &&
             (parseObject(run.resultJson?.executionCancellation).state === "acknowledged" || isAcknowledgedNativeStop(run)) &&
             !interruptedQueue),
