@@ -68,7 +68,7 @@ describeEmbeddedPostgres("slashbin handed-on hold", () => {
 
   // The state SLA-1968 was left in: A's run cancelled by the reassignment, the
   // sweep's not-current closure on its hold, the card now on B.
-  async function seed(hold: { outcome?: string; status?: string; workspaceRestoreFailure?: string } = {}) {
+  async function seed(hold: { outcome?: string; status?: string; workspaceRestoreFailure?: string; stopCode?: string } = {}) {
     const companyId = randomUUID();
     const [giverId, receiverId] = [randomUUID(), randomUUID()];
     const issueId = randomUUID();
@@ -88,8 +88,10 @@ describeEmbeddedPostgres("slashbin handed-on hold", () => {
     await db.insert(agents).values([agent(giverId, "Giver"), agent(receiverId, "Receiver")]);
     await db.insert(heartbeatRuns).values({
       id: runId, companyId, agentId: giverId, invocationSource: "assignment", triggerDetail: "system",
-      status: "cancelled", errorCode: "issue_reassigned", runtimeMode: "legacy", runtimeModeResolvedAt: new Date(),
+      status: "cancelled", errorCode: hold.stopCode ?? "issue_reassigned", runtimeMode: "legacy", runtimeModeResolvedAt: new Date(),
       startedAt: new Date(), finishedAt: new Date(), contextSnapshot: { issueId, taskId: issueId },
+      // As production writes a process stop (SLA-1968's giver run).
+      resultJson: { executionCancellation: { state: "acknowledged", acknowledgedAt: new Date().toISOString() } },
     });
     await db.insert(issues).values({
       id: issueId, companyId, title: "Hand me on", status: "todo", priority: "medium",
@@ -179,7 +181,20 @@ describeEmbeddedPostgres("slashbin handed-on hold", () => {
     expect(giverRuns.map((r) => r.id)).toEqual([s.runId]);
   });
 
+  it("delivers it when the new owner's only run was refused at admission", async () => {
+    const s = await seed();
+    await db.insert(heartbeatRuns).values({
+      companyId: s.companyId, agentId: s.receiverId, invocationSource: "on_demand", triggerDetail: "system",
+      status: "cancelled", errorCode: "execution_reconciliation_required", runtimeMode: "legacy",
+      runtimeModeResolvedAt: new Date(), finishedAt: new Date(), contextSnapshot: { issueId: s.issueId, taskId: s.issueId },
+    });
+    const saved = await saveComment(s, s.receiverId);
+    await recover();
+    expect(await runsCarrying(s.receiverId, saved.commentId)).toHaveLength(1);
+  });
+
   for (const [label, hold] of [
+    ["an operator Stop of the previous owner", { stopCode: "cancelled" }],
     ["an active hold", { status: "active" }],
     ["a hold the sweep settled as blocked", { outcome: "blocked" }],
     ["an unsafe-workspace hold", { workspaceRestoreFailure: "restore_unsafe_archive" }],
