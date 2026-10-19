@@ -8,6 +8,7 @@ import {
   LEGACY_DISPOSITION_REPAIR_INSTRUCTION, type LegacyDispositionEpisode,
 } from "./legacy-continuation.js";
 import { hasLiveLegacyController } from "../legacy-controller-lease.js";
+import { isSelfHandoffAwaitingCommit } from "../../agent-run-cancellation.js";
 import { instanceSettingsService } from "../instance-settings.js";
 import { isWaitingConversation, settleConversationTurn, deliverConversationComments } from "../agent-conversations.js";
 import {
@@ -3716,7 +3717,12 @@ export function recoveryService(
     return decideLegacyContinuation({
       run, issue, agent, episode,
       gates: {
-        stopped: stop.kind !== "clear" || isOperatorCancelledRun(run, run.agentId),
+        // slashbin (EM#625): a self-handoff giver is a stopped run while its
+        // hand-on can still commit; the card only still reads as the giver's.
+        // This gate covers origination (the periodic sweep) and dispatch
+        // (legacyRepairDispatchBlock). Past the window the hand-on never
+        // committed, and the card is recovered like any finished run's.
+        stopped: stop.kind !== "clear" || isOperatorCancelledRun(run, run.agentId) || isSelfHandoffAwaitingCommit(run),
         paused: pause, budgetBlocked: budget,
         pendingWait: state.hasDurableWaitingPath || durableWait || parseIssueExecutionState(issue.executionState)?.status === "pending" || Boolean(issue.monitorNextCheckAt),
         activeExecution: state.hasActiveExecutionPath || latest?.id !== (dispatchRunId ?? run.id),

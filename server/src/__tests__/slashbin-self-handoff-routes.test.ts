@@ -21,7 +21,7 @@ import {
   issues,
 } from "@paperclipai/db";
 import { runningProcesses } from "../adapters/index.js";
-import { agentRunWritesRevoked, assertAgentRunWriteAllowed } from "../agent-run-cancellation.js";
+import { agentRunWritesRevoked, assertAgentRunWriteAllowed, SELF_HANDOFF_COMMIT_WINDOW_MS } from "../agent-run-cancellation.js";
 import { errorHandler } from "../middleware/index.js";
 import { issueRoutes } from "../routes/issues.js";
 import { heartbeatService } from "../services/heartbeat.js";
@@ -275,7 +275,9 @@ describeEmbeddedPostgres("slashbin self-handoff run accounting", () => {
   // Review round 4, R1: the giver's executor can finalize before the hand-on
   // commits (the card is still in_progress on the giver, nothing pending).
   // Finalization must not originate giver recovery work in that window.
-  it("originates no giver recovery when the executor finalizes before the hand-on commits", async () => {
+  // The route's self-handoff stop on a giver run by the real executor, drained
+  // through finalization, with the issue update not yet committed.
+  async function settleGiverBeforeCommit() {
     await db.insert(authUsers).values({ id: "operator", name: "Operator", email: "operator@example.test", createdAt: new Date(), updatedAt: new Date() })
       .onConflictDoNothing();
     const s = await seed("process");
@@ -309,18 +311,51 @@ describeEmbeddedPostgres("slashbin self-handoff run accounting", () => {
     } as any);
     expect(settled?.status).toBe("succeeded");
     await drainHeartbeatRunsToQuiescence(db, heartbeat);
+    return { s, heartbeat, giverRun: giverRun! };
+  }
+
+  async function expectNoGiverRecovery(g: Awaited<ReturnType<typeof settleGiverBeforeCommit>>) {
+    const { s, giverRun } = g;
     const [issue] = await db.select().from(issues).where(eq(issues.id, s.issueId));
     expect(issue!.assigneeAgentId).toBe(s.giverId);
     expect(issue!.status).toBe("in_progress");
-    const [run] = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, giverRun!.id));
+    const [run] = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, giverRun.id));
     expect(run!.status).toBe("succeeded");
     expect(run!.resultJson).toHaveProperty("presentationDecision");
     const giverRuns = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.agentId, s.giverId));
     expect(giverRuns.map((r) => r.id).sort(), JSON.stringify(giverRuns.map((r) => [r.status, r.contextSnapshot?.wakeReason, r.errorCode])))
-      .toEqual([s.runId, giverRun!.id].sort());
+      .toEqual([s.runId, giverRun.id].sort());
     const giverWakes = await db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.agentId, s.giverId));
-    expect(giverWakes.filter((w) => w.id !== giverRun!.wakeupRequestId && w.status !== "claimed")).toEqual([]);
+    expect(giverWakes.filter((w) => w.id !== giverRun.wakeupRequestId && w.status !== "claimed")).toEqual([]);
     expect(await db.select().from(issueRecoveryActions).where(eq(issueRecoveryActions.sourceIssueId, s.issueId))).toHaveLength(0);
+  }
+
+  // Review round 4, R1: the giver's executor can finalize before the hand-on
+  // commits (the card is still in_progress on the giver, nothing pending).
+  // Finalization must not originate giver recovery work in that window.
+  it("originates no giver recovery when the executor finalizes before the hand-on commits", async () => {
+    await expectNoGiverRecovery(await settleGiverBeforeCommit());
+  }, 60_000);
+
+  // Review round 5, R1: the periodic stranded sweep can also land between the
+  // stop and the commit. It must not originate (or dispatch) a giver repair
+  // then; once the commit window has plainly passed without a commit, the
+  // hand-on was rejected or lost, and the sweep recovers the card as before.
+  it("periodic recovery leaves a self-handoff giver alone until the hand-on could have committed", async () => {
+    const g = await settleGiverBeforeCommit();
+    await g.heartbeat.reconcileStrandedAssignedIssues();
+    await drainHeartbeatRunsToQuiescence(db, g.heartbeat);
+    await expectNoGiverRecovery(g);
+
+    // A hand-on that never committed must not strand the card on the giver.
+    await db.update(heartbeatRuns).set({ finishedAt: new Date(Date.now() - SELF_HANDOFF_COMMIT_WINDOW_MS - 60_000) })
+      .where(eq(heartbeatRuns.id, g.giverRun.id));
+    await g.heartbeat.reconcileStrandedAssignedIssues();
+    await drainHeartbeatRunsToQuiescence(db, g.heartbeat);
+    const giverRuns = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.agentId, g.s.giverId));
+    expect(giverRuns.filter((r) => r.contextSnapshot?.wakeReason === "issue_disposition_repair" ||
+      r.invocationSource === "automation").length, JSON.stringify(giverRuns.map((r) => [r.status, r.invocationSource, r.contextSnapshot?.wakeReason])))
+      .toBeGreaterThan(0);
   }, 60_000);
 
   // Review round 2, R2: a comment deferred to the giver before the hand-on

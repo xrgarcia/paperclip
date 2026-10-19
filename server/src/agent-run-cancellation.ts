@@ -18,6 +18,32 @@ export function isAcknowledgedSelfHandoffStop(run: {
     typeof result.issueMutationStopId === "string" && result.issueMutationStopId.length > 0;
 }
 
+/**
+ * slashbin (EM#625): how long after a self-handoff stop settles its hand-on
+ * mutation can still commit. The stop and the commit run in one PATCH request,
+ * so a real hand-on commits within seconds; this bound is far above any request
+ * lifetime. Past it, a card still on the giver was never handed on (the
+ * mutation was rejected after the stop, or the server died), and recovery
+ * treats the giver like any other finished run.
+ */
+export const SELF_HANDOFF_COMMIT_WINDOW_MS = 10 * 60_000;
+
+/**
+ * slashbin (EM#625): a self-handoff giver whose hand-on may still commit. Until
+ * then the card still reads as the giver's, so recovery must not originate or
+ * dispatch giver work for it; the stop already ended the giver's turn.
+ */
+export function isSelfHandoffAwaitingCommit(run: {
+  status: string;
+  resultJson?: Record<string, unknown> | null;
+  finishedAt?: Date | null;
+  updatedAt?: Date | null;
+} | null | undefined, now = Date.now()): boolean {
+  if (!isAcknowledgedSelfHandoffStop(run)) return false;
+  const settledAt = run?.finishedAt ?? run?.updatedAt;
+  return !settledAt || now - settledAt.getTime() < SELF_HANDOFF_COMMIT_WINDOW_MS;
+}
+
 /** Stop revokes write authority before waiting for the executor to settle. */
 export function agentRunWritesRevoked(run: {
   status: string;
