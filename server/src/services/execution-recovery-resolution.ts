@@ -15,6 +15,7 @@ import {
   type Db,
 } from "@paperclipai/db";
 import { conflict } from "../errors.js";
+import { rewakeStaleBlockedOwnersOnSchedule } from "./routable-blocked.js";
 import { buildExecutionContinuation } from "./execution-continuation.js";
 import {
   EXECUTION_RECONCILIATION_CAUSES,
@@ -301,6 +302,14 @@ export async function deliverReconciledExecutions(
         "Reconciled execution continuation remains pending for retry",
       );
     }
+  }
+  // Slashbin patch: this sweep already runs on the server's execution-control
+  // timer with a wake in hand, so the stale blocked-owner re-wake rides on it
+  // rather than patching index.ts into the overlay.
+  try {
+    await rewakeStaleBlockedOwnersOnSchedule(db, wake);
+  } catch (err) {
+    logger.warn({ err }, "Blocked-owner re-wake sweep failed; retrying next tick");
   }
 }
 
