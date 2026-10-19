@@ -31,6 +31,19 @@ function handedOnHoldPredicate() {
   )!;
 }
 
+/** slashbin (EM#625): the stopped run behind this card's handed-on hold, if any. Its
+ * release may drain the new owner's saved input, which no run of theirs ever will. */
+export async function handedOnHoldRunId(db: Db, companyId: string, issueId: string): Promise<string | null> {
+  const [hold] = await db.select({ evidence: issueRecoveryActions.evidence }).from(issueRecoveryActions).where(and(
+    eq(issueRecoveryActions.companyId, companyId), eq(issueRecoveryActions.sourceIssueId, issueId),
+    inArray(issueRecoveryActions.cause, [...EXECUTION_RECONCILIATION_CAUSES]),
+    sql`${issueRecoveryActions.evidence}->'automaticRecovery'->>'replay' = 'blocked'`,
+    handedOnHoldPredicate(),
+  )).orderBy(desc(issueRecoveryActions.updatedAt), desc(issueRecoveryActions.id)).limit(1);
+  const runId = z.string().guid().safeParse(hold?.evidence.runId ?? hold?.evidence.sourceRunId);
+  return runId.success ? runId.data : null;
+}
+
 export async function getExecutionBlocker(db: Db, companyId: string, issueId: string, options?: { conversationResetCommentId?: string | null }): Promise<ExecutionBlocker | null> {
   const [conversation] = await db.select({ agentId: issues.conversationAgentId,
     boundaryId: issues.conversationBoundaryCommentId }).from(issues).where(and(

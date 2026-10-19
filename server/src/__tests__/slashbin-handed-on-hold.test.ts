@@ -11,10 +11,12 @@ import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import {
   agentWakeupRequests,
   agents,
+  authUsers,
   companies,
   companyMemberships,
   createDb,
   heartbeatRuns,
+  issueComments,
   issueRecoveryActions,
   issues,
 } from "@paperclipai/db";
@@ -66,7 +68,7 @@ describeEmbeddedPostgres("slashbin handed-on hold", () => {
 
   // The state SLA-1968 was left in: A's run cancelled by the reassignment, the
   // sweep's not-current closure on its hold, the card now on B.
-  async function seed(hold: { outcome?: string; workspaceRestoreFailure?: string } = {}) {
+  async function seed(hold: { outcome?: string; status?: string; workspaceRestoreFailure?: string } = {}) {
     const companyId = randomUUID();
     const [giverId, receiverId] = [randomUUID(), randomUUID()];
     const issueId = randomUUID();
@@ -94,7 +96,7 @@ describeEmbeddedPostgres("slashbin handed-on hold", () => {
       assigneeAgentId: receiverId, createdByAgentId: giverId,
     });
     const [action] = await db.insert(issueRecoveryActions).values({
-      companyId, sourceIssueId: issueId, kind: "active_run_watchdog", status: "resolved",
+      companyId, sourceIssueId: issueId, kind: "active_run_watchdog", status: hold.status ?? "resolved",
       outcome: hold.outcome ?? "cancelled", ownerType: "board", returnOwnerAgentId: giverId,
       cause: "legacy_execution_requires_reconciliation", fingerprint: `legacy-execution:${runId}`,
       evidence: {
@@ -139,5 +141,66 @@ describeEmbeddedPostgres("slashbin handed-on hold", () => {
   it("keeps an unsafe-workspace hold whoever owns the card", async () => {
     const s = await seed({ workspaceRestoreFailure: "restore_unsafe_archive" });
     expect(await getExecutionBlocker(db, s.companyId, s.issueId)).toMatchObject({ recoveryActionId: s.actionId });
+  });
+
+  // Review S2: input saved while the hold applied. The new owner never ran on
+  // the card, and nothing new arrives; ordinary recovery must deliver it.
+  async function saveComment(s: Awaited<ReturnType<typeof seed>>, agentId: string) {
+    await db.insert(authUsers).values({ id: "operator", name: "Operator", email: "operator@example.test", createdAt: new Date(), updatedAt: new Date() })
+      .onConflictDoNothing();
+    const [comment] = await db.insert(issueComments).values({
+      companyId: s.companyId, issueId: s.issueId, authorType: "user", authorUserId: "operator", body: "Saved while held",
+    }).returning();
+    const [wake] = await db.insert(agentWakeupRequests).values({
+      companyId: s.companyId, agentId, source: "automation", reason: "issue_execution_deferred", status: "deferred_issue_execution",
+      payload: { issueId: s.issueId, commentId: comment!.id, _paperclipWakeContext: { issueId: s.issueId, wakeReason: "issue_commented", wakeCommentIds: [comment!.id] } },
+    }).returning();
+    return { commentId: comment!.id, wakeId: wake!.id };
+  }
+
+  async function recover() {
+    await heartbeatService(db).resumeQueuedRuns();
+    await drainHeartbeatRunsToQuiescence(db, heartbeatService(db));
+  }
+
+  async function runsCarrying(agentId: string, commentId: string) {
+    const runs = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.agentId, agentId));
+    return runs.filter((r) => (r.contextSnapshot?.wakeCommentIds as string[] | undefined)?.includes(commentId));
+  }
+
+  it("delivers input saved while held to a new owner who never ran on the card", async () => {
+    const s = await seed();
+    const saved = await saveComment(s, s.receiverId);
+    await recover();
+    expect(await runsCarrying(s.receiverId, saved.commentId)).toHaveLength(1);
+    const [wake] = await db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.id, saved.wakeId));
+    expect(wake!.status).not.toBe("deferred_issue_execution");
+    const giverRuns = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.agentId, s.giverId));
+    expect(giverRuns.map((r) => r.id)).toEqual([s.runId]);
+  });
+
+  for (const [label, hold] of [
+    ["an active hold", { status: "active" }],
+    ["a hold the sweep settled as blocked", { outcome: "blocked" }],
+    ["an unsafe-workspace hold", { workspaceRestoreFailure: "restore_unsafe_archive" }],
+  ] as const) {
+    it(`keeps saved input waiting behind ${label}`, async () => {
+      const s = await seed(hold);
+      const saved = await saveComment(s, s.receiverId);
+      await recover();
+      expect(await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.agentId, s.receiverId))).toEqual([]);
+      const [wake] = await db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.id, saved.wakeId));
+      expect(wake!.status).toBe("deferred_issue_execution");
+    });
+  }
+
+  it("keeps saved input waiting when the card returns to the owner whose run was stopped", async () => {
+    const s = await seed();
+    await db.update(issues).set({ assigneeAgentId: s.giverId }).where(eq(issues.id, s.issueId));
+    const saved = await saveComment(s, s.giverId);
+    await recover();
+    expect(await runsCarrying(s.giverId, saved.commentId)).toEqual([]);
+    const [wake] = await db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.id, saved.wakeId));
+    expect(wake!.status).toBe("deferred_issue_execution");
   });
 });

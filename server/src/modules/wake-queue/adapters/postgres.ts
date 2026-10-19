@@ -3,7 +3,7 @@ import { isAcknowledgedNativeReassignmentStop, isAcknowledgedNativeStop } from "
 import { isCompletedOnboardingHandoffWake } from "../../../services/chat-completion-delivery.js";
 import { instanceSettingsService } from "../../../services/instance-settings.js";
 import { currentConversationCommentCondition } from "../../../services/agent-conversations.js";
-import { getExecutionBlocker } from "../../../services/execution-blocker.js";
+import { getExecutionBlocker, handedOnHoldRunId } from "../../../services/execution-blocker.js";
 import { and, asc, eq, inArray, isNull, notInArray, or, sql } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
 import { extractIssueReferenceIdentifiers } from "@paperclipai/shared";
@@ -1105,7 +1105,11 @@ export function createPostgresWakeQueueAdapter(db: Db, deps: WakeQueuePostgresAd
           issueStatus: issueRow?.status ?? "",
           hasAssigneeUser: Boolean(issueRow?.assigneeUserId),
           assigneeAgentMatchesRunAgent: issueRow?.assigneeAgentId === run.agentId,
-          legacyExecutionNeedsReconciliation: legacyExecutionNeedsReconciliation(run),
+          // slashbin (EM#625): once its hold is handed on, the old owner's stopped run
+          // drains the new owner's saved input; the drain still checks every blocker.
+          legacyExecutionNeedsReconciliation: legacyExecutionNeedsReconciliation(run) &&
+            !(issueRow && issueRow.assigneeAgentId !== run.agentId &&
+              await handedOnHoldRunId(tx, run.companyId, issueRow.id) === run.id),
           // An operator stop never promotes old queued work by itself. The
           // next explicit wake adopts those messages atomically when it
           // queues a run.
