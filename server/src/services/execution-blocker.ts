@@ -10,8 +10,25 @@ export function executionBlockerPredicate() {
     not(conversationRecoveryActionPredicate()!),
     inArray(issueRecoveryActions.cause, [...EXECUTION_RECONCILIATION_CAUSES]),
     or(inArray(issueRecoveryActions.status, ["active", "escalated"]),
-      sql`${issueRecoveryActions.evidence}->'automaticRecovery'->>'replay' = 'blocked'`),
+      and(sql`${issueRecoveryActions.evidence}->'automaticRecovery'->>'replay' = 'blocked'`,
+        not(handedOnHoldPredicate()))),
   );
+}
+
+// slashbin (EM#625): the settle sweep closes a hold whose card moved to another
+// owner as `cancelled` but leaves replay blocked, so the new owner's every wake is
+// skipped or deferred and nothing promotes it. Uncertain work is the previous
+// owner's to not replay; the new owner starts fresh. The hold applies again if
+// the card returns to that owner. An unsafe-workspace hold always stands.
+function handedOnHoldPredicate() {
+  return and(
+    eq(issueRecoveryActions.status, "resolved"),
+    eq(issueRecoveryActions.outcome, "cancelled"),
+    sql`${issueRecoveryActions.returnOwnerAgentId} is not null`,
+    sql`coalesce(${issueRecoveryActions.evidence}->>'workspaceRestoreFailure', '') <> 'restore_unsafe_archive'`,
+    sql`not exists (select 1 from ${issues} where ${issues.id} = ${issueRecoveryActions.sourceIssueId}
+      and ${issues.assigneeAgentId} = ${issueRecoveryActions.returnOwnerAgentId})`,
+  )!;
 }
 
 export async function getExecutionBlocker(db: Db, companyId: string, issueId: string, options?: { conversationResetCommentId?: string | null }): Promise<ExecutionBlocker | null> {
