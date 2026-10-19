@@ -272,6 +272,57 @@ describeEmbeddedPostgres("slashbin self-handoff run accounting", () => {
     });
   });
 
+  // Review round 4, R1: the giver's executor can finalize before the hand-on
+  // commits (the card is still in_progress on the giver, nothing pending).
+  // Finalization must not originate giver recovery work in that window.
+  it("originates no giver recovery when the executor finalizes before the hand-on commits", async () => {
+    await db.insert(authUsers).values({ id: "operator", name: "Operator", email: "operator@example.test", createdAt: new Date(), updatedAt: new Date() })
+      .onConflictDoNothing();
+    const s = await seed("process");
+    runningProcesses.delete(s.runId);
+    children.get(s.runId)!.kill();
+    children.delete(s.runId);
+    await db.update(issues).set({ executionRunId: null, executionLockedAt: null, executionAgentNameKey: null, status: "todo" })
+      .where(eq(issues.id, s.issueId));
+    await db.update(heartbeatRuns).set({ status: "cancelled", finishedAt: new Date() }).where(eq(heartbeatRuns.id, s.runId));
+    await db.update(agents).set({ adapterConfig: { command: process.execPath, args: ["-e", "setInterval(() => {}, 1000)"] } })
+      .where(eq(agents.id, s.giverId));
+    const heartbeat = heartbeatService(db);
+    const giverRun = await heartbeat.wakeup(s.giverId, {
+      source: "assignment", triggerDetail: "system", reason: "issue_assigned",
+      payload: { issueId: s.issueId }, contextSnapshot: { issueId: s.issueId, taskId: s.issueId, wakeReason: "issue_assigned" },
+    });
+    await vi.waitFor(async () => {
+      const [issue] = await db.select().from(issues).where(eq(issues.id, s.issueId));
+      expect(issue!.executionRunId).toBe(giverRun!.id);
+      expect(runningProcesses.has(giverRun!.id)).toBe(true);
+    }, { timeout: 20_000, interval: 100 });
+    // A replacement giver run, if one is originated, exits at once and is counted.
+    await db.update(agents).set({ adapterConfig: { command: process.execPath, args: ["-e", ""] } })
+      .where(eq(agents.id, s.giverId));
+    // Exactly the route's self-handoff stop, with the issue update not yet committed.
+    const settled = await heartbeat.cancelRun(giverRun!.id, "Completed by handing the issue on", {
+      settleAs: "succeeded",
+      resultJson: { reassignmentStopConfirmed: true, issueMutationStopId: randomUUID(), selfHandoff: true },
+      eventMessage: "run completed by handing the issue on",
+      eventPayload: { issueId: s.issueId },
+    } as any);
+    expect(settled?.status).toBe("succeeded");
+    await drainHeartbeatRunsToQuiescence(db, heartbeat);
+    const [issue] = await db.select().from(issues).where(eq(issues.id, s.issueId));
+    expect(issue!.assigneeAgentId).toBe(s.giverId);
+    expect(issue!.status).toBe("in_progress");
+    const [run] = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, giverRun!.id));
+    expect(run!.status).toBe("succeeded");
+    expect(run!.resultJson).toHaveProperty("presentationDecision");
+    const giverRuns = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.agentId, s.giverId));
+    expect(giverRuns.map((r) => r.id).sort(), JSON.stringify(giverRuns.map((r) => [r.status, r.contextSnapshot?.wakeReason, r.errorCode])))
+      .toEqual([s.runId, giverRun!.id].sort());
+    const giverWakes = await db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.agentId, s.giverId));
+    expect(giverWakes.filter((w) => w.id !== giverRun!.wakeupRequestId && w.status !== "claimed")).toEqual([]);
+    expect(await db.select().from(issueRecoveryActions).where(eq(issueRecoveryActions.sourceIssueId, s.issueId))).toHaveLength(0);
+  }, 60_000);
+
   // Review round 2, R2: a comment deferred to the giver before the hand-on
   // reaches the receiver; the giver's settlement must not start a new giver run.
   it("delivers a comment deferred before the hand-on to the receiver, never a new giver run", async () => {

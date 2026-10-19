@@ -25,6 +25,7 @@ import { AGENT_CHAT_DIRECTIVE, conversationReplay, isConversation, isConversatio
 import { getConversationConfirmationContext, type ConversationConfirmationContext } from "./conversation-confirmation-context.js";
 import { PROCESS_IDENTITY_RECORDED, recordNativeLocalProcessStop } from "./native-local-process-stop.js";
 import { hasAcknowledgedNativeReassignmentStopIntent, hasAcknowledgedNativeStopIntent, isAcknowledgedNativeStop, acknowledgedNativeStopExecutionHasStopped } from "./acknowledged-native-stop.js";
+import { isAcknowledgedSelfHandoffStop } from "../agent-run-cancellation.js";
 import { legacyControllerBootId, legacyControllerClaim, renewLegacyControllerLease, hasLiveLegacyController, revokeExpiredLegacyController, watchLegacyControllerLease } from "./legacy-controller-lease.js";
 import { completeTerminatedRemoteNativeSessionCleanup } from "../vendor/paperclip-runner/index.js";
 import { hasRemoteTerminationReceipt, remoteExecutionHasStopped, remoteTerminationReceipt, stoppedRemoteCleanupScopes } from "./remote-execution-termination.js";
@@ -25708,7 +25709,12 @@ export function heartbeatService(
               parseObject(livenessRun.contextSnapshot)
                 .resumeSessionGoalHeartbeat === true,
           });
-          if (!conversationSettled) {
+          // slashbin (EM#625): a giver that handed its own card on is a stopped
+          // run. Its executor may finalize before the hand-on mutation commits,
+          // while the card still reads in_progress on the giver; review-path and
+          // legacy-continuation recovery would then queue a replacement giver run.
+          // After the commit, ownership has moved and the receiver's wake owns it.
+          if (!conversationSettled && !isAcknowledgedSelfHandoffStop(livenessRun)) {
             await handleIssueReviewPathDisposition(livenessRun);
             if (livenessRun.runtimeMode !== "native") {
               await recovery.reconcileLegacyContinuation(livenessRun.id);
