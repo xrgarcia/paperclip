@@ -15,15 +15,37 @@ export function executionBlockerPredicate() {
   );
 }
 
-// slashbin (EM#625): the settle sweep closes a hold whose card moved to another
-// owner as `cancelled` but leaves replay blocked, so the new owner's every wake is
-// skipped or deferred and nothing promotes it. Uncertain work is the previous
-// owner's to not replay; the new owner starts fresh. The hold applies again if
-// the card returns to that owner. An unsafe-workspace hold always stands.
+// slashbin (EM#625, EM#683): the settle sweep closes a hold whose card moved to
+// another owner as `cancelled` but leaves replay blocked, so the new owner's every
+// wake is skipped or deferred and nothing promotes it. Uncertain work is the
+// previous owner's to not replay; the new owner starts fresh. The hold applies
+// again if the card returns to that owner. An unsafe-workspace hold always stands.
+//
+// The sweep may instead have settled the hold while the card was still the giver's
+// (`blocked`, "Automatic recovery stopped"), the card being handed on afterwards.
+// That hold is freed too, but only when the giver's run stopped because the card
+// was handed on (`issue_reassigned`) or the server shut down under it
+// (`server_shutdown_interrupted`): an operator Stop (`cancelled`) or any other
+// failure of the giver keeps holding.
+/** The giver's run stopped for a reason that a later handoff of the card releases. */
+export function isHandedOnStop(run: { status: string; errorCode: string | null }): boolean {
+  return (run.status === "cancelled" && run.errorCode === "issue_reassigned") ||
+    (run.status === "interrupted" && run.errorCode === "server_shutdown_interrupted");
+}
+
 function handedOnHoldPredicate() {
   return and(
     eq(issueRecoveryActions.status, "resolved"),
-    eq(issueRecoveryActions.outcome, "cancelled"),
+    or(
+      eq(issueRecoveryActions.outcome, "cancelled"),
+      and(
+        eq(issueRecoveryActions.outcome, "blocked"),
+        sql`exists (select 1 from ${heartbeatRuns} where ${heartbeatRuns.companyId} = ${issueRecoveryActions.companyId}
+          and ${heartbeatRuns.id}::text = ${issueRecoveryActions.evidence}->>'runId'
+          and ((${heartbeatRuns.status} = 'cancelled' and ${heartbeatRuns.errorCode} = 'issue_reassigned')
+            or (${heartbeatRuns.status} = 'interrupted' and ${heartbeatRuns.errorCode} = 'server_shutdown_interrupted')))`,
+      ),
+    ),
     sql`${issueRecoveryActions.returnOwnerAgentId} is not null`,
     sql`coalesce(${issueRecoveryActions.evidence}->>'workspaceRestoreFailure', '') <> 'restore_unsafe_archive'`,
     sql`not exists (select 1 from ${issues} where ${issues.id} = ${issueRecoveryActions.sourceIssueId}
