@@ -64,16 +64,18 @@ export async function deliverAgentUnblockNotification(input: {
  * card blocked with nothing to wake its owner again. Past `hours` since the last
  * wake (or since it entered Blocked, when none was sent), the owning agent is
  * woken again; it resolves the card, hands it up, or is woken again `hours` later.
- * A card owned by the board, or with a run on it now, is left alone.
+ * A card owned by the board, or with a run on it now, is left alone. So is one
+ * its owner does not hold: dispatch cancels a run for an agent that is not the
+ * card's assignee (issue_assignee_changed), so the owner could not be reached on it.
  */
 export function staleBlockedOwner(
-  issue: RoutableBlockedIssue & { executionRunId?: string | null; updatedAt?: Date | null },
+  issue: RoutableBlockedIssue & { assigneeAgentId?: string | null; executionRunId?: string | null; updatedAt?: Date | null },
   now: Date,
   hours: number,
 ): { agentId: string; since: Date } | null {
   if (hours <= 0 || issue.status !== "blocked" || issue.executionRunId) return null;
   const owner = issue.unblockDescriptor?.owner;
-  if (!owner || owner === "board" || !("agentId" in owner)) return null;
+  if (!owner || owner === "board" || !("agentId" in owner) || issue.assigneeAgentId !== owner.agentId) return null;
   const since = issue.blockedOwnerNotifiedAt ?? issue.blockedTransitionAt ?? issue.updatedAt ?? null;
   if (!since || now.getTime() - since.getTime() < hours * 3_600_000) return null;
   return { agentId: owner.agentId, since };
@@ -110,6 +112,7 @@ export async function rewakeStaleBlockedOwners(
       id: issues.id,
       companyId: issues.companyId,
       status: issues.status,
+      assigneeAgentId: issues.assigneeAgentId,
       unblockDescriptor: issues.unblockDescriptor,
       blockedTransitionAt: issues.blockedTransitionAt,
       blockedOwnerNotifiedAt: issues.blockedOwnerNotifiedAt,
@@ -122,8 +125,10 @@ export async function rewakeStaleBlockedOwners(
         eq(issues.status, "blocked"),
         isNull(issues.hiddenAt),
         isNull(issues.executionRunId),
-        // Only agent-owned cards take a batch slot: board and user owners are never woken here.
-        sql`${issues.unblockDescriptor}->'owner'->>'agentId' is not null`,
+        // Only cards their owning agent holds take a batch slot: board and user
+        // owners are never woken here, and an owner that is not the assignee
+        // would have its run cancelled at dispatch.
+        sql`${issues.unblockDescriptor}->'owner'->>'agentId' = ${issues.assigneeAgentId}::text`,
         sql`${since} < ${cutoff.toISOString()}::timestamptz`,
         // A card behind a recovery hold waits on its reconciliation, which the
         // board performs; deliverReconciledExecutions then wakes the owner with
@@ -153,6 +158,7 @@ export async function rewakeStaleBlockedOwners(
           eq(issues.companyId, issue.companyId),
           eq(issues.id, issue.id),
           eq(issues.status, "blocked"),
+          eq(issues.assigneeAgentId, stale.agentId),
           issue.blockedOwnerNotifiedAt
             ? eq(issues.blockedOwnerNotifiedAt, issue.blockedOwnerNotifiedAt)
             : isNull(issues.blockedOwnerNotifiedAt),

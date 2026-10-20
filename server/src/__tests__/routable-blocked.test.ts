@@ -15,6 +15,7 @@ function blockedIssue(input: {
   return {
     id: "00000000-0000-4000-8000-000000000002",
     status: "blocked",
+    assigneeAgentId: agentId as string | null,
     unblockDescriptor: { owner: { agentId }, action: "Review the finding" } as const,
     blockedTransitionAt: input.transitionAt === undefined
       ? new Date(ROUTABLE_BLOCKED_ROLLOUT_AT.getTime() + 1)
@@ -92,6 +93,12 @@ describe("stale blocked owner re-wake", () => {
 
   it("counts from entering Blocked when no wake was ever sent", () => {
     expect(staleBlockedOwner(blockedIssue({ transitionAt: hoursAgo(50) }), now, 4)).toEqual({ agentId, since: hoursAgo(50) });
+  });
+
+  it("leaves a card its owner does not hold alone: dispatch would cancel the run", () => {
+    const old = blockedIssue({ transitionAt: hoursAgo(30), notifiedAt: hoursAgo(5) });
+    expect(staleBlockedOwner({ ...old, assigneeAgentId: "00000000-0000-4000-8000-000000000009" }, now, 4)).toBeNull();
+    expect(staleBlockedOwner({ ...old, assigneeAgentId: null }, now, 4)).toBeNull();
   });
 
   it("leaves a board-owned card, a card with a run on it, and a disabled window alone", () => {

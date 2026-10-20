@@ -51,6 +51,7 @@ describeEmbeddedPostgres("blocked owner re-wake sweep", () => {
       companyId,
       title,
       status: "blocked",
+      assigneeAgentId: owner === "board" || !("agentId" in owner) ? null : agentId,
       unblockDescriptor: { owner, action: `rule on ${title}` },
       blockedTransitionAt: hoursAgo(48),
       blockedOwnerNotifiedAt: notifiedAt,
@@ -82,6 +83,25 @@ describeEmbeddedPostgres("blocked owner re-wake sweep", () => {
     // The next sweep inside the window sends nothing more.
     await expect(rewakeStaleBlockedOwners(db, wake, 4, new Date(now.getTime() + 60_000))).resolves.toBe(0);
     expect(wake).toHaveBeenCalledTimes(2);
+  });
+
+  it("leaves a stale card its owner does not hold: assigned to another agent or to a person", async () => {
+    const { companyId, agentId, card } = await fixture();
+    await db.delete(issues);
+    const otherAgent = randomUUID();
+    await db.insert(agents).values({ id: otherAgent, companyId, name: "Foreman", role: "engineer", status: "idle", adapterType: "codex_local" });
+    const onAgent = { ...card("with the Foreman", hoursAgo(5)), assigneeAgentId: otherAgent };
+    const onPerson = { ...card("with a person", hoursAgo(5)), assigneeAgentId: null, assigneeUserId: "user-1" };
+    const held = card("held by its owner", hoursAgo(5));
+    await db.insert(issues).values([onAgent, onPerson, held]);
+    const wake = vi.fn(async () => ({ id: randomUUID() }));
+
+    await expect(rewakeStaleBlockedOwners(db, wake, 4, now)).resolves.toBe(1);
+    expect(wake.mock.calls.map(([who, o]) => [who, (o as { payload: { issueId: string } }).payload.issueId])).toEqual([[agentId, held.id]]);
+    for (const left of [onAgent, onPerson]) {
+      const [r] = await db.select().from(issues).where(eq(issues.id, left.id));
+      expect(r.blockedOwnerNotifiedAt?.toISOString()).toBe(hoursAgo(5).toISOString());
+    }
   });
 
   it("does nothing when the window is 0", async () => {
