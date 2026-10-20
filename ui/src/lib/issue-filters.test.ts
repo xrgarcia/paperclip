@@ -6,6 +6,7 @@ import {
   applyIssueFilters,
   countActiveIssueFilters,
   defaultIssueFilterState,
+  normalizeIssueFilterState,
   resolveIssueFilterWorkspaceId,
   searchIssueFilterOptions,
   shouldIncludeIssueFilterWorkspaceOption,
@@ -251,5 +252,22 @@ describe("issue filters", () => {
     );
 
     expect(filtered).toEqual([]);
+  });
+
+  it("hides issues carrying an excluded label and counts the filter", () => {
+    const epic = makeIssue({ id: "epic", labelIds: ["l-epic", "l-x"] });
+    const plain = makeIssue({ id: "plain", labelIds: ["l-x"] });
+    const none = makeIssue({ id: "none", labelIds: undefined });
+    const state = { ...defaultIssueFilterState, excludedLabels: ["l-epic"] };
+    expect(applyIssueFilters([epic, plain, none], state).map((i) => i.id)).toEqual(["plain", "none"]);
+    expect(countActiveIssueFilters(state)).toBe(1);
+    expect(countActiveIssueFilters(defaultIssueFilterState)).toBe(0);
+  });
+
+  it("loads old saved state without excludedLabels", () => {
+    const old = { statuses: ["todo"], labels: ["l-x"] };
+    expect(normalizeIssueFilterState(old).excludedLabels).toEqual([]);
+    expect(normalizeIssueFilterState({ excludedLabels: ["a", 3] }).excludedLabels).toEqual(["a"]);
+    expect(normalizeIssueFilterState(null).excludedLabels).toEqual([]);
   });
 });
