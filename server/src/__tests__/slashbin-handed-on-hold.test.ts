@@ -1,8 +1,10 @@
 // slashbin (EM#625): a card handed from seat A to seat B after A's run was
 // cancelled. The settle sweep closes A's hold as `cancelled` with replay still
 // blocked; B's wakes must run, not be skipped or deferred forever (SLA-1968).
-// The hold stands for A, for a hold the sweep settled as `blocked`, and for an
-// unsafe workspace.
+// The same when the sweep settled the hold as `blocked` (the card was still A's)
+// and the card was handed on afterwards (SLA-1919, 1973, 1992, EM#683), provided A's
+// run stopped for the handoff or a server shutdown. The hold stands for A, for an
+// operator Stop or other failure of A, and for an unsafe workspace.
 import { randomUUID } from "node:crypto";
 import express from "express";
 import request from "supertest";
@@ -68,7 +70,7 @@ describeEmbeddedPostgres("slashbin handed-on hold", () => {
 
   // The state SLA-1968 was left in: A's run cancelled by the reassignment, the
   // sweep's not-current closure on its hold, the card now on B.
-  async function seed(hold: { outcome?: string; status?: string; workspaceRestoreFailure?: string; stopCode?: string } = {}) {
+  async function seed(hold: { outcome?: string; status?: string; workspaceRestoreFailure?: string; stopCode?: string; runStatus?: string } = {}) {
     const companyId = randomUUID();
     const [giverId, receiverId] = [randomUUID(), randomUUID()];
     const issueId = randomUUID();
@@ -88,10 +90,11 @@ describeEmbeddedPostgres("slashbin handed-on hold", () => {
     await db.insert(agents).values([agent(giverId, "Giver"), agent(receiverId, "Receiver")]);
     await db.insert(heartbeatRuns).values({
       id: runId, companyId, agentId: giverId, invocationSource: "assignment", triggerDetail: "system",
-      status: "cancelled", errorCode: hold.stopCode ?? "issue_reassigned", runtimeMode: "legacy", runtimeModeResolvedAt: new Date(),
+      status: hold.runStatus ?? "cancelled", errorCode: hold.stopCode ?? "issue_reassigned", runtimeMode: "legacy", runtimeModeResolvedAt: new Date(),
       startedAt: new Date(), finishedAt: new Date(), contextSnapshot: { issueId, taskId: issueId },
-      // As production writes a process stop (SLA-1968's giver run).
-      resultJson: { executionCancellation: { state: "acknowledged", acknowledgedAt: new Date().toISOString() } },
+      // As production writes a process stop (SLA-1968's giver run); a shutdown interrupt carries no cancellation.
+      resultJson: hold.runStatus === "interrupted" ? {}
+        : { executionCancellation: { state: "acknowledged", acknowledgedAt: new Date().toISOString() } },
     });
     await db.insert(issues).values({
       id: issueId, companyId, title: "Hand me on", status: "todo", priority: "medium",
@@ -104,9 +107,12 @@ describeEmbeddedPostgres("slashbin handed-on hold", () => {
       evidence: {
         runId,
         ...(hold.workspaceRestoreFailure ? { workspaceRestoreFailure: hold.workspaceRestoreFailure } : {}),
-        automaticRecovery: { policy: "preserve_without_replay_v1", runId, replay: "blocked", actionOutcome: "unknown" },
+        automaticRecovery: { policy: "preserve_without_replay_v1", runId, replay: "blocked", actionOutcome: "unknown", recordedAt: new Date().toISOString() },
       },
-      nextAction: "Recovery closed because the task's owner, execution, or status changed. No work was replayed.",
+      // The sweep's two settlements (execution-recovery-resolution.ts): not-current -> cancelled, current -> blocked.
+      nextAction: (hold.outcome ?? "cancelled") === "blocked"
+        ? "Automatic recovery stopped. Recorded work is preserved; actions with unverified outcomes will not be repeated."
+        : "Recovery closed because the task's owner, execution, or status changed. No work was replayed.",
       resolvedAt: new Date(),
     }).returning();
     return { companyId, giverId, receiverId, issueId, runId, actionId: action!.id };
@@ -135,8 +141,42 @@ describeEmbeddedPostgres("slashbin handed-on hold", () => {
     expect(await getExecutionBlocker(db, s.companyId, s.issueId)).toMatchObject({ recoveryActionId: s.actionId });
   });
 
-  it("keeps a hold the sweep settled as blocked", async () => {
+  // EM#683: settled while the card was still the giver's, so the hold stands until it is handed on.
+  it("keeps a hold the sweep settled as blocked while the card is with the giver", async () => {
     const s = await seed({ outcome: "blocked" });
+    await db.update(issues).set({ assigneeAgentId: s.giverId }).where(eq(issues.id, s.issueId));
+    expect(await getExecutionBlocker(db, s.companyId, s.issueId)).toMatchObject({ recoveryActionId: s.actionId });
+  });
+
+  it("frees a hold the sweep settled as blocked once the card is handed on", async () => {
+    const s = await seed({ outcome: "blocked" });
+    expect(await getExecutionBlocker(db, s.companyId, s.issueId)).toBeNull();
+  });
+
+  it("frees a blocked hold whose giver run was interrupted by a server shutdown (SLA-1992)", async () => {
+    const s = await seed({ outcome: "blocked", runStatus: "interrupted", stopCode: "server_shutdown_interrupted" });
+    expect(await getExecutionBlocker(db, s.companyId, s.issueId)).toBeNull();
+  });
+
+  it("holds a blocked hold again if the card returns to the giver", async () => {
+    const s = await seed({ outcome: "blocked" });
+    await db.update(issues).set({ assigneeAgentId: s.giverId }).where(eq(issues.id, s.issueId));
+    expect(await getExecutionBlocker(db, s.companyId, s.issueId)).toMatchObject({ recoveryActionId: s.actionId });
+  });
+
+  it("keeps a blocked hold after an operator Stop or another failure of the giver, handed on or not", async () => {
+    for (const hold of [
+      { stopCode: "cancelled" },
+      { runStatus: "failed", stopCode: "adapter_failed" },
+      { runStatus: "interrupted", stopCode: "cancelled" },
+    ]) {
+      const s = await seed({ outcome: "blocked", ...hold });
+      expect(await getExecutionBlocker(db, s.companyId, s.issueId)).toMatchObject({ recoveryActionId: s.actionId });
+    }
+  });
+
+  it("keeps a blocked unsafe-workspace hold after the handoff", async () => {
+    const s = await seed({ outcome: "blocked", workspaceRestoreFailure: "restore_unsafe_archive" });
     expect(await getExecutionBlocker(db, s.companyId, s.issueId)).toMatchObject({ recoveryActionId: s.actionId });
   });
 
@@ -181,6 +221,20 @@ describeEmbeddedPostgres("slashbin handed-on hold", () => {
     expect(giverRuns.map((r) => r.id)).toEqual([s.runId]);
   });
 
+  it("delivers input saved behind a blocked hold once the card is handed on", async () => {
+    const s = await seed({ outcome: "blocked" });
+    const saved = await saveComment(s, s.receiverId);
+    await recover();
+    expect(await runsCarrying(s.receiverId, saved.commentId)).toHaveLength(1);
+  });
+
+  it("delivers it when the giver's run was interrupted by a server shutdown (SLA-1992)", async () => {
+    const s = await seed({ outcome: "blocked", runStatus: "interrupted", stopCode: "server_shutdown_interrupted" });
+    const saved = await saveComment(s, s.receiverId);
+    await recover();
+    expect(await runsCarrying(s.receiverId, saved.commentId)).toHaveLength(1);
+  });
+
   it("delivers it when the new owner's only run was refused at admission", async () => {
     const s = await seed();
     await db.insert(heartbeatRuns).values({
@@ -196,7 +250,7 @@ describeEmbeddedPostgres("slashbin handed-on hold", () => {
   for (const [label, hold] of [
     ["an operator Stop of the previous owner", { stopCode: "cancelled" }],
     ["an active hold", { status: "active" }],
-    ["a hold the sweep settled as blocked", { outcome: "blocked" }],
+    ["an operator Stop settled as blocked", { outcome: "blocked", stopCode: "cancelled" }],
     ["an unsafe-workspace hold", { workspaceRestoreFailure: "restore_unsafe_archive" }],
   ] as const) {
     it(`keeps saved input waiting behind ${label}`, async () => {
