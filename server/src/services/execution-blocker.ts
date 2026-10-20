@@ -8,7 +8,6 @@ import { EXECUTION_RECONCILIATION_CAUSES, type ExecutionBlocker } from "@papercl
 export function executionBlockerPredicate() {
   return and(
     not(conversationRecoveryActionPredicate()!),
-    not(freshStartHoldPredicate()),
     inArray(issueRecoveryActions.cause, [...EXECUTION_RECONCILIATION_CAUSES]),
     or(inArray(issueRecoveryActions.status, ["active", "escalated"]),
       and(sql`${issueRecoveryActions.evidence}->'automaticRecovery'->>'replay' = 'blocked'`,
@@ -30,15 +29,6 @@ function handedOnHoldPredicate() {
     sql`not exists (select 1 from ${issues} where ${issues.id} = ${issueRecoveryActions.sourceIssueId}
       and ${issues.assigneeAgentId} = ${issueRecoveryActions.returnOwnerAgentId})`,
   )!;
-}
-
-// slashbin (EM#684): a blocked card left behind a reconciliation hold for a whole
-// re-wake window starts its owner on a fresh conversation (rewakeStaleBlockedOwners),
-// as a board user's `/new` would: the stopped run is not resumed, so its uncertain
-// actions are not replayed. An unsafe-workspace hold always stands.
-function freshStartHoldPredicate() {
-  return sql`(${issueRecoveryActions.evidence} ? 'blockedOwnerFreshStart'
-    and coalesce(${issueRecoveryActions.evidence}->>'workspaceRestoreFailure', '') <> 'restore_unsafe_archive')`;
 }
 
 /** slashbin (EM#625): the stopped run behind this card's handed-on hold, if any. Its
