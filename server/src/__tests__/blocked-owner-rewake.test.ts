@@ -104,6 +104,20 @@ describeEmbeddedPostgres("blocked owner re-wake sweep", () => {
     }
   });
 
+  it("puts the stamp back on a wake that throws, and still wakes the rest of the batch", async () => {
+    const { stale, never } = await fixture();
+    const wake = vi.fn(async (_: string, o: unknown) => {
+      if ((o as { payload: { issueId: string } }).payload.issueId === stale.id) throw new Error("agent not invokable");
+      return { id: randomUUID() };
+    });
+
+    await expect(rewakeStaleBlockedOwners(db, wake, 4, now)).resolves.toBe(1);
+    const [row] = await db.select().from(issues).where(eq(issues.id, stale.id));
+    expect(row.blockedOwnerNotifiedAt?.toISOString()).toBe(stale.blockedOwnerNotifiedAt!.toISOString());
+    const [woken] = await db.select().from(issues).where(eq(issues.id, never.id));
+    expect(woken.blockedOwnerNotifiedAt?.toISOString()).toBe(now.toISOString());
+  });
+
   it("does nothing when the window is 0", async () => {
     await fixture();
     const wake = vi.fn(async () => undefined);

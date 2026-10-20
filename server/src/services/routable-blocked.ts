@@ -166,21 +166,26 @@ export async function rewakeStaleBlockedOwners(
       )
       .returning({ id: issues.id });
     if (!claimed.length) continue;
-    const run = await wake(stale.agentId, {
-      source: "automation",
-      triggerDetail: "system",
-      reason: "issue_unblock_requested",
-      idempotencyKey: `issue-unblock-rewake:${issue.id}:${stale.since.toISOString()}`,
-      payload: { issueId: issue.id, action: issue.unblockDescriptor!.action, rewake: true },
-      requestedByActorType: "system",
-      requestedByActorId: "blocked-owner-rewake",
-      contextSnapshot: { wakeReason: "issue_unblock_requested", issueId: issue.id, taskId: issue.id },
-    });
+    let run: unknown = null;
+    try {
+      run = await wake(stale.agentId, {
+        source: "automation",
+        triggerDetail: "system",
+        reason: "issue_unblock_requested",
+        idempotencyKey: `issue-unblock-rewake:${issue.id}:${stale.since.toISOString()}`,
+        payload: { issueId: issue.id, action: issue.unblockDescriptor!.action, rewake: true },
+        requestedByActorType: "system",
+        requestedByActorId: "blocked-owner-rewake",
+        contextSnapshot: { wakeReason: "issue_unblock_requested", issueId: issue.id, taskId: issue.id },
+      });
+    } catch (err) {
+      logger.warn({ err, issueId: issue.id, agentId: stale.agentId }, "blocked-owner re-wake failed");
+    }
     if (run) {
       woken++;
       continue;
     }
-    // Deferred or skipped: no run started, so the owner was not notified. Put the
+    // Deferred, skipped or failed: no run started, so the owner was not notified. Put the
     // stamp back and pass the card over for a window.
     await db
       .update(issues)
