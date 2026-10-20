@@ -476,16 +476,40 @@ export function IssueFiltersPopover({
                     <FilterOptionSearch value={labelSearch} onChange={setLabelSearch} label="Labels" />
                   ) : null}
                   <div data-filter-options="labels" className={streamlined ? "space-y-0.5" : "max-h-32 space-y-0.5 overflow-y-auto"}>
-                    {(streamlined ? visibleLabels : labels).map((label) => (
-                      <label key={label.id} className="flex cursor-pointer items-center gap-2 rounded-sm px-2 py-1 hover:bg-accent/50">
-                        <Checkbox
-                          checked={state.labels.includes(label.id)}
-                          onCheckedChange={() => onChange({ labels: toggleIssueFilterValue(state.labels, label.id) })}
-                        />
-                        <span className="h-2.5 w-2.5 rounded-full" style={{ backgroundColor: label.color }} />
-                        <span className="text-sm">{label.name}</span>
-                      </label>
-                    ))}
+                    {(streamlined ? visibleLabels : labels).map((label) => {
+                      const excluded = state.excludedLabels.includes(label.id);
+                      return (
+                        <div key={label.id} className="flex items-center gap-1 rounded-sm hover:bg-accent/50">
+                          <label className="flex min-w-0 flex-1 cursor-pointer items-center gap-2 px-2 py-1">
+                            <Checkbox
+                              checked={state.labels.includes(label.id)}
+                              onCheckedChange={() =>
+                                onChange({
+                                  labels: toggleIssueFilterValue(state.labels, label.id),
+                                  excludedLabels: state.excludedLabels.filter((id) => id !== label.id),
+                                })
+                              }
+                            />
+                            <span className="h-2.5 w-2.5 rounded-full" style={{ backgroundColor: label.color }} />
+                            <span className={excluded ? "text-sm line-through text-muted-foreground" : "text-sm"}>{label.name}</span>
+                          </label>
+                          <button
+                            type="button"
+                            aria-label={`Hide label ${label.name}`}
+                            aria-pressed={excluded}
+                            className={`mr-1 rounded-sm px-1.5 py-0.5 text-xs ${excluded ? "bg-accent text-foreground" : "text-muted-foreground hover:text-foreground"}`}
+                            onClick={() =>
+                              onChange({
+                                excludedLabels: toggleIssueFilterValue(state.excludedLabels, label.id),
+                                labels: state.labels.filter((id) => id !== label.id),
+                              })
+                            }
+                          >
+                            Hide
+                          </button>
+                        </div>
+                      );
+                    })}
                   </div>
                 </div>
               ) : null}

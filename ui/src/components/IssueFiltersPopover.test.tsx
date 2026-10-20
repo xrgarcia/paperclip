@@ -229,4 +229,26 @@ describe("IssueFiltersPopover", () => {
 
     act(() => root.unmount());
   });
+
+  it("lets a label be hidden, which clears it from the include list", () => {
+    const root = createRoot(container);
+    const onChange = vi.fn();
+    act(() => {
+      root.render(
+        <IssueFiltersPopover
+          presentation="streamlined"
+          state={{ ...defaultIssueFilterState, labels: ["label-1"] }}
+          onChange={onChange}
+          activeFilterCount={1}
+          labels={[{ id: "label-1", name: "Bug", color: "#ff0000" }]}
+          enableExternalObjectFilters={false}
+        />,
+      );
+    });
+    const hide = container.querySelector<HTMLButtonElement>('button[aria-label="Hide label Bug"]');
+    expect(hide).not.toBeNull();
+    act(() => hide?.click());
+    expect(onChange).toHaveBeenCalledWith({ excludedLabels: ["label-1"], labels: [] });
+    act(() => root.unmount());
+  });
 });

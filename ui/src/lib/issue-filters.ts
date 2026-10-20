@@ -18,6 +18,8 @@ export type IssueFilterState = {
   assignees: string[];
   creators: string[];
   labels: string[];
+  /** Label ids to hide: issues carrying any of these are dropped (Slashbin patch). */
+  excludedLabels: string[];
   projects: string[];
   workspaces: string[];
   liveOnly?: boolean;
@@ -45,6 +47,7 @@ export const defaultIssueFilterState: IssueFilterState = {
   assignees: [],
   creators: [],
   labels: [],
+  excludedLabels: [],
   projects: [],
   workspaces: [],
   liveOnly: false,
@@ -111,6 +114,7 @@ export function normalizeIssueFilterState(value: unknown): IssueFilterState {
     assignees: normalizeIssueFilterValueArray(candidate.assignees),
     creators: normalizeIssueFilterValueArray(candidate.creators),
     labels: normalizeIssueFilterValueArray(candidate.labels),
+    excludedLabels: normalizeIssueFilterValueArray(candidate.excludedLabels),
     projects: normalizeIssueFilterValueArray(candidate.projects),
     workspaces: normalizeIssueFilterValueArray(candidate.workspaces),
     liveOnly: candidate.liveOnly === true,
@@ -245,6 +249,9 @@ export function applyIssueFilters(
   if (state.labels.length > 0) {
     result = result.filter((issue) => (issue.labelIds ?? []).some((id) => state.labels.includes(id)));
   }
+  if (state.excludedLabels.length > 0) {
+    result = result.filter((issue) => !(issue.labelIds ?? []).some((id) => state.excludedLabels.includes(id)));
+  }
   if (state.projects.length > 0) {
     result = result.filter((issue) => issue.projectId != null && state.projects.includes(issue.projectId));
   }
@@ -277,6 +284,7 @@ export function countActiveIssueFilters(
   if (state.assignees.length > 0) count += 1;
   if (state.creators.length > 0) count += 1;
   if (state.labels.length > 0) count += 1;
+  if (state.excludedLabels.length > 0) count += 1;
   if (state.projects.length > 0) count += 1;
   if (state.workspaces.length > 0) count += 1;
   if (state.liveOnly) count += 1;
