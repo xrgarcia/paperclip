@@ -7,6 +7,7 @@ import {
   startEmbeddedPostgresTestDatabase,
 } from "./helpers/embedded-postgres.js";
 import { resetBlockedOwnerRewakeState, rewakeStaleBlockedOwners } from "../services/routable-blocked.ts";
+import { getExecutionBlocker } from "../services/execution-blocker.ts";
 
 const embeddedPostgresSupport = await getEmbeddedPostgresTestSupport();
 const describeEmbeddedPostgres = embeddedPostgresSupport.supported ? describe : describe.skip;
@@ -90,27 +91,59 @@ describeEmbeddedPostgres("blocked owner re-wake sweep", () => {
     await expect(rewakeStaleBlockedOwners(db, wake, 0, now)).resolves.toBe(0);
     expect(wake).not.toHaveBeenCalled();
   });
-  it("leaves a card behind a recovery hold to the reconciliation, and still wakes the others", async () => {
-    const { companyId, agentId, stale, never } = await fixture();
-    // The shape a SIGTERM-interrupted process-adapter run leaves (legacy-execution-recovery.ts).
-    await db.insert(issueRecoveryActions).values({
-      companyId,
-      sourceIssueId: stale.id,
-      kind: "active_run_watchdog",
-      status: "active",
-      ownerType: "board",
-      returnOwnerAgentId: agentId,
-      cause: "legacy_execution_requires_reconciliation",
-      fingerprint: `legacy-execution:${randomUUID()}`,
-      evidence: { runId: randomUUID() },
-      nextAction: "Inspect the stopped provider and recorded actions, then reconcile their outcomes before continuing.",
+  // The shape a SIGTERM-interrupted process-adapter run leaves (legacy-execution-recovery.ts).
+  const legacyHold = (companyId: string, sourceIssueId: string, returnOwnerAgentId: string, evidence: Record<string, unknown> = {}) => ({
+    companyId,
+    sourceIssueId,
+    kind: "active_run_watchdog",
+    status: "active",
+    ownerType: "board",
+    returnOwnerAgentId,
+    cause: "legacy_execution_requires_reconciliation",
+    fingerprint: `legacy-execution:${randomUUID()}`,
+    evidence: { runId: randomUUID(), ...evidence },
+    nextAction: "Inspect the stopped provider and recorded actions, then reconcile their outcomes before continuing.",
+  });
+
+  it("starts the owner of a card held past a window on a fresh conversation, and lifts only that hold", async () => {
+    const { companyId, agentId, stale, fresh } = await fixture();
+    const hold = legacyHold(companyId, stale.id, agentId);
+    await db.insert(issueRecoveryActions).values([hold, legacyHold(companyId, fresh.id, agentId)]);
+    expect(await getExecutionBlocker(db, companyId, stale.id)).not.toBeNull();
+    const wake = vi.fn(async () => ({ id: randomUUID() }));
+
+    await expect(rewakeStaleBlockedOwners(db, wake, 4, now)).resolves.toBe(2);
+    const call = wake.mock.calls.find(([, o]) => (o as { payload: { issueId: string } }).payload.issueId === stale.id)!;
+    expect((call[1] as { contextSnapshot: Record<string, unknown> }).contextSnapshot).toMatchObject({
+      forceFreshSession: true,
+      previousRunId: hold.evidence.runId,
     });
+    expect(await getExecutionBlocker(db, companyId, stale.id)).toBeNull();
+    const [action] = await db.select().from(issueRecoveryActions).where(eq(issueRecoveryActions.sourceIssueId, stale.id));
+    expect(action.evidence.blockedOwnerFreshStart).toMatchObject({ agentId, at: now.toISOString() });
+    // Inside its window, the fresh card's hold stands.
+    expect(await getExecutionBlocker(db, companyId, fresh.id)).not.toBeNull();
+  });
+
+  it("puts the hold back when the fresh-start wake starts no run", async () => {
+    const { companyId, agentId, stale } = await fixture();
+    await db.insert(issueRecoveryActions).values(legacyHold(companyId, stale.id, agentId));
+    const wake = vi.fn(async () => null);
+
+    await expect(rewakeStaleBlockedOwners(db, wake, 4, now)).resolves.toBe(0);
+    expect(await getExecutionBlocker(db, companyId, stale.id)).not.toBeNull();
+    const [row] = await db.select().from(issues).where(eq(issues.id, stale.id));
+    expect(row.blockedOwnerNotifiedAt?.toISOString()).toBe(stale.blockedOwnerNotifiedAt!.toISOString());
+  });
+
+  it("never lifts an unsafe-workspace hold", async () => {
+    const { companyId, agentId, stale, never } = await fixture();
+    await db.insert(issueRecoveryActions).values(legacyHold(companyId, stale.id, agentId, { workspaceRestoreFailure: "restore_unsafe_archive" }));
     const wake = vi.fn(async () => ({ id: randomUUID() }));
 
     await expect(rewakeStaleBlockedOwners(db, wake, 4, now)).resolves.toBe(1);
     expect(wake.mock.calls.map(([, o]) => (o as { payload: { issueId: string } }).payload.issueId)).toEqual([never.id]);
-    const [held] = await db.select().from(issues).where(eq(issues.id, stale.id));
-    expect(held.blockedOwnerNotifiedAt?.toISOString()).toBe(stale.blockedOwnerNotifiedAt!.toISOString());
+    expect(await getExecutionBlocker(db, companyId, stale.id)).not.toBeNull();
   });
 
   it("does not count or stamp a wake that started no run, and does not retry it inside the window", async () => {
@@ -144,24 +177,14 @@ describeEmbeddedPostgres("blocked owner re-wake sweep", () => {
     expect((wake.mock.calls[0][1] as { payload: { issueId: string } }).payload.issueId).toBe(target.id);
   });
 
-  it("pages past more than a batch of held cards to the eligible one", async () => {
+  it("pages past more than a batch of cards behind unsafe-workspace holds to the eligible one", async () => {
     const { card, companyId, agentId } = await fixture();
     await db.delete(issues);
     const held = Array.from({ length: 30 }, (_, i) => card(`held ${i}`, hoursAgo(100)));
     const target = card("eligible", hoursAgo(5));
     await db.insert(issues).values([...held, target]);
-    await db.insert(issueRecoveryActions).values(held.map((h) => ({
-      companyId,
-      sourceIssueId: h.id,
-      kind: "active_run_watchdog",
-      status: "active",
-      ownerType: "board",
-      returnOwnerAgentId: agentId,
-      cause: "legacy_execution_requires_reconciliation",
-      fingerprint: `legacy-execution:${h.id}`,
-      evidence: {},
-      nextAction: "Reconcile.",
-    })));
+    await db.insert(issueRecoveryActions).values(held.map((h) =>
+      legacyHold(companyId, h.id, agentId, { workspaceRestoreFailure: "restore_unsafe_archive" })));
     const wake = vi.fn(async () => ({ id: randomUUID() }));
 
     await expect(rewakeStaleBlockedOwners(db, wake, 4, now)).resolves.toBe(1);

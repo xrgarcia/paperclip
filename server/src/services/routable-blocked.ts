@@ -79,8 +79,8 @@ export function staleBlockedOwner(
   return { agentId: owner.agentId, since };
 }
 
-// Cards a sweep passed over (behind a recovery hold, or a wake that started no
-// run), with when: kept out of later batches for one window so they neither
+// Cards a sweep passed over (behind a blocker it cannot lift, or a wake that
+// started no run), with when: kept out of later batches for one window so they neither
 // starve the cards behind them nor get retried every minute. Per process; a
 // restart costs at most one more attempt each.
 const passedOver = new Map<string, number>();
@@ -95,7 +95,10 @@ export async function rewakeStaleBlockedOwners(
     payload: { issueId: string; action: string; rewake: true };
     requestedByActorType: "system";
     requestedByActorId: string;
-    contextSnapshot: { wakeReason: "issue_unblock_requested"; issueId: string; taskId: string };
+    contextSnapshot: {
+      wakeReason: "issue_unblock_requested"; issueId: string; taskId: string;
+      forceFreshSession?: true; previousRunId?: string | null; recoveryActionId?: string;
+    };
   }) => Promise<unknown>,
   hours: number,
   now = new Date(),
@@ -125,11 +128,8 @@ export async function rewakeStaleBlockedOwners(
         // Only agent-owned cards take a batch slot: board and user owners are never woken here.
         sql`${issues.unblockDescriptor}->'owner'->>'agentId' is not null`,
         sql`${since} < ${cutoff.toISOString()}::timestamptz`,
-        // A card behind a recovery hold waits on its reconciliation, which the
-        // board performs; deliverReconciledExecutions then wakes the owner with
-        // an authorized continuation. A system wake cannot pass the hold
-        // (admitExplicitNativeContinuation admits users only), so it is not tried.
-        sql`not exists (select 1 from ${issueRecoveryActions} where ${issueRecoveryActions.companyId} = ${issues.companyId} and ${issueRecoveryActions.sourceIssueId} = ${issues.id} and ${executionBlockerPredicate()})`,
+        // An unsafe workspace waits on a person's repair, whatever the window.
+        sql`not exists (select 1 from ${issueRecoveryActions} where ${issueRecoveryActions.companyId} = ${issues.companyId} and ${issueRecoveryActions.sourceIssueId} = ${issues.id} and ${executionBlockerPredicate()} and ${issueRecoveryActions.evidence}->>'workspaceRestoreFailure' = 'restore_unsafe_archive')`,
         passedOver.size ? notInArray(issues.id, [...passedOver.keys()]) : undefined,
       ),
     )
@@ -139,11 +139,19 @@ export async function rewakeStaleBlockedOwners(
   for (const issue of rows) {
     const stale = staleBlockedOwner(issue, now, hours);
     if (!stale) continue;
-    // A blocker the SQL cannot see (conversation ownership) would only defer the wake.
-    if (await getExecutionBlocker(db, issue.companyId, issue.id)) {
+    // A reconciliation hold (a run stopped mid-action, e.g. by SIGTERM) defers any
+    // system wake, and nobody may be around to reconcile it. A window on, the owner
+    // starts fresh instead: the hold is marked so it no longer applies, and the wake
+    // asks for a new conversation, so the stopped run is never resumed or replayed.
+    // Any other blocker (conversation ownership) would only defer the wake.
+    const blocker = await getExecutionBlocker(db, issue.companyId, issue.id);
+    if (blocker && !blocker.recoveryActionId) {
       passedOver.set(issue.id, now.getTime());
       continue;
     }
+    const freshStart = blocker?.recoveryActionId
+      ? { recoveryActionId: blocker.recoveryActionId, previousRunId: blocker.runId }
+      : null;
     // Claim the nudge first: one wake per window, however many sweeps see the card.
     const claimed = await db
       .update(issues)
@@ -160,6 +168,17 @@ export async function rewakeStaleBlockedOwners(
       )
       .returning({ id: issues.id });
     if (!claimed.length) continue;
+    if (freshStart) {
+      await db
+        .update(issueRecoveryActions)
+        .set({
+          evidence: sql`${issueRecoveryActions.evidence} || ${JSON.stringify({
+            blockedOwnerFreshStart: { at: now.toISOString(), agentId: stale.agentId, windowHours: hours },
+          })}::jsonb`,
+        })
+        .where(and(eq(issueRecoveryActions.companyId, issue.companyId), eq(issueRecoveryActions.id, freshStart.recoveryActionId)));
+      logger.info({ issueId: issue.id, agentId: stale.agentId, ...freshStart }, "blocked-owner re-wake: owner starts fresh past a reconciliation hold");
+    }
     const run = await wake(stale.agentId, {
       source: "automation",
       triggerDetail: "system",
@@ -168,7 +187,10 @@ export async function rewakeStaleBlockedOwners(
       payload: { issueId: issue.id, action: issue.unblockDescriptor!.action, rewake: true },
       requestedByActorType: "system",
       requestedByActorId: "blocked-owner-rewake",
-      contextSnapshot: { wakeReason: "issue_unblock_requested", issueId: issue.id, taskId: issue.id },
+      contextSnapshot: {
+        wakeReason: "issue_unblock_requested", issueId: issue.id, taskId: issue.id,
+        ...(freshStart ? { forceFreshSession: true as const, ...freshStart } : {}),
+      },
     });
     if (run) {
       woken++;
@@ -180,6 +202,11 @@ export async function rewakeStaleBlockedOwners(
       .update(issues)
       .set({ blockedOwnerNotifiedAt: issue.blockedOwnerNotifiedAt ?? null })
       .where(and(eq(issues.companyId, issue.companyId), eq(issues.id, issue.id), eq(issues.blockedOwnerNotifiedAt, now)));
+    if (freshStart)
+      await db
+        .update(issueRecoveryActions)
+        .set({ evidence: sql`${issueRecoveryActions.evidence} - 'blockedOwnerFreshStart'` })
+        .where(and(eq(issueRecoveryActions.companyId, issue.companyId), eq(issueRecoveryActions.id, freshStart.recoveryActionId)));
     passedOver.set(issue.id, now.getTime());
     logger.warn({ issueId: issue.id, agentId: stale.agentId }, "blocked-owner re-wake started no run; retrying after one window");
   }
