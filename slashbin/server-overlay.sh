@@ -25,6 +25,7 @@ SERVER_FILES=(
   modules/wake-queue/adapters/postgres.ts
   services/recovery/service.ts
   services/execution-blocker.ts
+  services/routable-blocked.ts
 )
 
 out="${1:?usage: server-overlay.sh <out-dir>}"
