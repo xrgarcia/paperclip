@@ -1,5 +1,5 @@
 import { and, asc, eq, isNull, notInArray, sql } from "drizzle-orm";
-import { issueRecoveryActions, issues, type Db } from "@paperclipai/db";
+import { heartbeatRuns, issueRecoveryActions, issues, type Db } from "@paperclipai/db";
 import { logger } from "../middleware/logger.js";
 import { executionBlockerPredicate, getExecutionBlocker } from "./execution-blocker.js";
 import type { IssueUnblockDescriptor } from "@paperclipai/shared";
@@ -197,13 +197,97 @@ export async function rewakeStaleBlockedOwners(
   return woken;
 }
 
+/**
+ * Slashbin patch: an agent's in-review card has no wake at all once it is there.
+ * The bridge's inbox lists todo, in_progress and blocked only, so a card the
+ * agent holds in review waits on that agent and nothing tells it so
+ * (jerky_service#193, #201, #203, #207: four co-release cards held by the EM's
+ * own outcome gate, idle with no run until the owner asked, 2026-10-19). Past
+ * `hours` with no change to the card and no run on it by its assignee, the
+ * assignee is woken on it; it moves the card, says why it waits, or is woken
+ * again `hours` after its last word. A card with a run on it now, or behind a
+ * recovery hold, is left alone.
+ */
+const stalledPassedOver = new Map<string, number>();
+
+export async function rewakeStalledReviewHolders(
+  db: Db,
+  wake: (agentId: string, options: {
+    source: "automation";
+    triggerDetail: "system";
+    reason: "issue_review_stalled";
+    idempotencyKey: string;
+    payload: { issueId: string; rewake: true };
+    requestedByActorType: "system";
+    requestedByActorId: string;
+    contextSnapshot: { wakeReason: "issue_review_stalled"; issueId: string; taskId: string };
+  }) => Promise<unknown>,
+  hours: number,
+  now = new Date(),
+) {
+  if (hours <= 0) return 0;
+  const windowMs = hours * 3_600_000;
+  for (const [id, at] of stalledPassedOver) if (now.getTime() - at >= windowMs) stalledPassedOver.delete(id);
+  const cutoff = new Date(now.getTime() - windowMs).toISOString();
+  const rows = await db
+    .select({ id: issues.id, companyId: issues.companyId, assigneeAgentId: issues.assigneeAgentId, updatedAt: issues.updatedAt })
+    .from(issues)
+    .where(
+      and(
+        eq(issues.status, "in_review"),
+        isNull(issues.hiddenAt),
+        isNull(issues.executionRunId),
+        sql`${issues.assigneeAgentId} is not null`,
+        sql`${issues.updatedAt} < ${cutoff}::timestamptz`,
+        // A run by the assignee on this card inside the window is the card being looked at.
+        sql`not exists (select 1 from ${heartbeatRuns} where ${heartbeatRuns.companyId} = ${issues.companyId} and ${heartbeatRuns.agentId} = ${issues.assigneeAgentId} and (${heartbeatRuns.contextSnapshot} ->> 'issueId') = ${issues.id}::text and ${heartbeatRuns.createdAt} >= ${cutoff}::timestamptz)`,
+        sql`not exists (select 1 from ${issueRecoveryActions} where ${issueRecoveryActions.companyId} = ${issues.companyId} and ${issueRecoveryActions.sourceIssueId} = ${issues.id} and ${executionBlockerPredicate()})`,
+        stalledPassedOver.size ? notInArray(issues.id, [...stalledPassedOver.keys()]) : undefined,
+      ),
+    )
+    .orderBy(asc(issues.updatedAt))
+    .limit(25);
+  let woken = 0;
+  for (const issue of rows) {
+    const agentId = issue.assigneeAgentId!;
+    if (await getExecutionBlocker(db, issue.companyId, issue.id)) {
+      stalledPassedOver.set(issue.id, now.getTime());
+      continue;
+    }
+    let run: unknown = null;
+    try {
+      run = await wake(agentId, {
+        source: "automation",
+        triggerDetail: "system",
+        reason: "issue_review_stalled",
+        // One wake per quiet stretch: the run, or the comment it ends on, starts the next.
+        idempotencyKey: `issue-review-stalled:${issue.id}:${issue.updatedAt.toISOString()}`,
+        payload: { issueId: issue.id, rewake: true },
+        requestedByActorType: "system",
+        requestedByActorId: "stalled-review-rewake",
+        contextSnapshot: { wakeReason: "issue_review_stalled", issueId: issue.id, taskId: issue.id },
+      });
+    } catch (err) {
+      logger.warn({ err, issueId: issue.id, agentId }, "stalled-review re-wake failed");
+    }
+    if (run) {
+      woken++;
+      continue;
+    }
+    stalledPassedOver.set(issue.id, now.getTime());
+    logger.warn({ issueId: issue.id, agentId }, "stalled-review re-wake started no run; retrying after one window");
+  }
+  return woken;
+}
+
 /** Test seam: forget the cards earlier sweeps passed over. */
 export function resetBlockedOwnerRewakeState() {
   passedOver.clear();
+  stalledPassedOver.clear();
   lastRewakeSweepAt = 0;
 }
 
-/** Hours a blocked card waits before its owning agent is woken again; 0 turns it off. */
+/** Hours a blocked (or in-review) card waits before its holding agent is woken again; 0 turns it off. */
 export function blockedOwnerRewakeHours(env: NodeJS.ProcessEnv = process.env): number {
   const raw = env.PAPERCLIP_BLOCKED_OWNER_REWAKE_HOURS;
   if (raw === undefined || raw.trim() === "") return 4;
@@ -213,13 +297,15 @@ export function blockedOwnerRewakeHours(env: NodeJS.ProcessEnv = process.env): n
 
 let lastRewakeSweepAt = 0;
 
-/** rewakeStaleBlockedOwners at most once a minute, however often the caller's timer ticks. */
+/** Both re-wake sweeps at most once a minute, however often the caller's timer ticks. */
 export async function rewakeStaleBlockedOwnersOnSchedule(
   db: Db,
-  wake: Parameters<typeof rewakeStaleBlockedOwners>[1],
+  wake: Parameters<typeof rewakeStaleBlockedOwners>[1] & Parameters<typeof rewakeStalledReviewHolders>[1],
   now = new Date(),
 ) {
   if (now.getTime() - lastRewakeSweepAt < 60_000) return 0;
   lastRewakeSweepAt = now.getTime();
-  return rewakeStaleBlockedOwners(db, wake, blockedOwnerRewakeHours(), now);
+  const hours = blockedOwnerRewakeHours();
+  const woken = await rewakeStaleBlockedOwners(db, wake, hours, now);
+  return woken + await rewakeStalledReviewHolders(db, wake, hours, now);
 }
