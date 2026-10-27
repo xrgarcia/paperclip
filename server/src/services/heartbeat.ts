@@ -184,6 +184,7 @@ import {
   workspaceOperations,
 } from "@paperclipai/db";
 import { conflict, HttpError, notFound } from "../errors.js";
+import { isUniqueViolation } from "../db-errors.js";
 import {
   getStartupTraceContext,
   getStartupTracer,
@@ -20086,8 +20087,14 @@ export function heartbeatService(
             rejectedClaims.push({ run: queuedRun, err });
             continue;
           }
-          if (!isDeferrableClaimRejection(err)) throw err;
-          logger.warn(
+          // Any other claim failure rolled back with its own transaction, so the
+          // run is still queued. Throwing here would abandon the runs this pass
+          // already claimed (left running with no process, reaped as
+          // process_lost) and stall every run behind this one on every pass.
+          // A unique violation is a conflicting open issue lock that can clear
+          // (two open executions of one routine fingerprint, SLA-2272).
+          const deferrable = isDeferrableClaimRejection(err) || isUniqueViolation(err);
+          logger[deferrable ? "warn" : "error"](
             { err, runId: queuedRun.id, agentId: queuedRun.agentId, companyId: queuedRun.companyId },
             "queued heartbeat run claim was rejected; leaving it queued for the next recovery pass",
           );
