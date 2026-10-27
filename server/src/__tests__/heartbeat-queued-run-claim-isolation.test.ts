@@ -7,6 +7,7 @@ import {
   companies,
   createDb,
   heartbeatRuns,
+  issues,
 } from "@paperclipai/db";
 import {
   getEmbeddedPostgresTestSupport,
@@ -240,6 +241,71 @@ describeEmbeddedPostgres("heartbeat queued-run claim isolation", () => {
     await heartbeat.drainActiveRunExecutions();
 
     expect(await runStatus(rejectedRunId)).toMatchObject({ status: "cancelled" });
+    expect(await runStatus(healthyRunId)).toMatchObject({ status: "succeeded" });
+  });
+  // Two open executions of one routine fingerprint (SLA-2272): binding the
+  // queued run's issue lock violates issues_open_routine_execution_uq, a raw
+  // database error rather than an HttpError. It must not stall the queue.
+  it("keeps a run whose issue lock conflicts queued without blocking the runs behind it", async () => {
+    const { companyId, agentId } = await insertAgent();
+    const issuePrefix = `R${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`;
+    const holderRunId = randomUUID();
+    await db.insert(heartbeatRuns).values({
+      id: holderRunId,
+      companyId,
+      agentId,
+      invocationSource: "automation",
+      triggerDetail: "system",
+      status: "succeeded",
+    });
+    const routine = { originKind: "routine_execution", originId: randomUUID(), originFingerprint: "fp" };
+    const holderIssueId = randomUUID();
+    const conflictedIssueId = randomUUID();
+    await db.insert(issues).values([
+      {
+        id: holderIssueId,
+        companyId,
+        title: "Routine execution holding the lock",
+        status: "todo",
+        priority: "medium",
+        responsibleUserId: "responsible-user",
+        assigneeAgentId: agentId,
+        executionRunId: holderRunId,
+        executionAgentNameKey: "claim isolation agent",
+        executionLockedAt: new Date(),
+        issueNumber: 1,
+        identifier: `${issuePrefix}-1`,
+        ...routine,
+      },
+      {
+        id: conflictedIssueId,
+        companyId,
+        title: "Duplicate routine execution",
+        status: "todo",
+        priority: "medium",
+        responsibleUserId: "responsible-user",
+        assigneeAgentId: agentId,
+        issueNumber: 2,
+        identifier: `${issuePrefix}-2`,
+        ...routine,
+      },
+    ]);
+    const { runId: conflictedRunId } = await insertQueuedRun(companyId, agentId, {
+      requestedByActorType: "user",
+      requestedByActorId: "board-user",
+      payload: { manualUserWake: true, issueId: conflictedIssueId },
+    }, new Date(Date.now() - 60_000));
+    await db
+      .update(heartbeatRuns)
+      .set({ contextSnapshot: { issueId: conflictedIssueId, taskId: conflictedIssueId } })
+      .where(sql`${heartbeatRuns.id} = ${conflictedRunId}`);
+    const { runId: healthyRunId } = await insertClaimableRun(companyId, agentId);
+
+    await expect(heartbeat.resumeQueuedRuns()).resolves.toBeUndefined();
+    await heartbeat.drainActiveRunExecutions();
+
+    expect(await runStatus(conflictedRunId)).toMatchObject({ status: "queued", errorCode: null });
+    expect(mockAdapterExecute).toHaveBeenCalledOnce();
     expect(await runStatus(healthyRunId)).toMatchObject({ status: "succeeded" });
   });
 });
