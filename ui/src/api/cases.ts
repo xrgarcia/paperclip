@@ -293,6 +293,36 @@ export function caseRevisionToDocumentRevision(caseId: string, key: string, revi
   };
 }
 
+// Slashbin (EM#642): publication of a protected-Case document. Mirrors the publish and
+// withdraw routes and the company's published-documents read in server/src/routes/cases.ts.
+export interface PublishedDocumentRow {
+  documentId: string;
+  caseId: string;
+  caseIdentifier: string;
+  key: string;
+  title: string | null;
+  revisionId: string;
+  revisionNumber: number;
+  publishedAt: string;
+}
+
+export interface PublishedDocuments {
+  companyId: string;
+  generatedAt: string;
+  documents: PublishedDocumentRow[];
+}
+
+export interface DocumentPublicationResult {
+  documentId: string;
+  caseId: string;
+  key: string;
+  state: "published" | "withdrawn";
+  revisionId: string;
+  revisionNumber: number;
+  publishedAt: string;
+  withdrawnAt: string | null;
+}
+
 export const casesApi = {
   list: (companyId: string, params: ListCasesParams = {}) =>
     api.get<CaseSummary[]>(`/companies/${companyId}/cases${toQuery(params)}`),
@@ -329,6 +359,12 @@ export const casesApi = {
     api.delete<{ ok: true }>(`/cases/${idOrIdentifier}/documents/${encodeURIComponent(key)}`),
   listRevisions: (idOrIdentifier: string, key: string) =>
     api.get<CaseDocumentRevisions>(`/cases/${idOrIdentifier}/documents/${encodeURIComponent(key)}/revisions`),
+  listPublished: (companyId: string) =>
+    api.get<PublishedDocuments>(`/companies/${companyId}/published-documents`),
+  publishDocument: (idOrIdentifier: string, key: string, input: { baseRevisionId: string; changeSummary: string }) =>
+    api.post<DocumentPublicationResult>(`/cases/${idOrIdentifier}/documents/${encodeURIComponent(key)}/publish`, input),
+  withdrawDocument: (idOrIdentifier: string, key: string, input: { changeSummary: string }) =>
+    api.post<DocumentPublicationResult>(`/cases/${idOrIdentifier}/documents/${encodeURIComponent(key)}/withdraw`, input),
   listForIssue: (issueIdOrIdentifier: string) =>
     api.get<IssueCaseLink[]>(`/issues/${issueIdOrIdentifier}/cases`),
 };

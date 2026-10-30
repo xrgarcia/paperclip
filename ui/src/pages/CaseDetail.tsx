@@ -35,6 +35,7 @@ import { CaseAttachmentsGallery } from "@/components/CaseAttachmentsGallery";
 import { IssueReferencePill } from "@/components/IssueReferencePill";
 import { PropertyChip, PropertyRow, PropertySection } from "@/components/issue-properties";
 import { IssueDocumentsSection } from "@/components/IssueDocumentsSection";
+import { CasePublicationPanel } from "@/components/CasePublicationPanel";
 import { CaseCopyableToken, CaseIdentifierKey } from "@/components/CaseIdentifierKey";
 import { copyTextToClipboard } from "@/lib/clipboard";
 import { cn } from "@/lib/utils";
@@ -701,6 +702,18 @@ export function CaseDetail() {
                 placeholder="Why you are changing this policy (recorded on each revision you save)"
               />
             </section>
+          ) : null}
+
+          {caseData.protected && selectedCompanyId ? (
+            <CasePublicationPanel
+              caseIdentifier={caseData.identifier}
+              companyId={selectedCompanyId}
+              documents={caseData.documents.map((ref) => ({
+                key: ref.key,
+                latestRevisionId: ref.document.latestRevisionId,
+                latestRevisionNumber: ref.document.latestRevisionNumber,
+              }))}
+            />
           ) : null}
 
           {caseDocumentSubject ? (
