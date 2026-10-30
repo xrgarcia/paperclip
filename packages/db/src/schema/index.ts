@@ -118,6 +118,7 @@ export { assets } from "./assets.js";
 export { runnerApiResponseReservations } from "./runner_api_response_reservations.js";
 export { issueAttachments } from "./issue_attachments.js";
 export { documents, documentPublications } from "./documents.js";
+export { documentIndexAcks } from "./document-index-acks.js";
 export { documentRevisions } from "./document_revisions.js";
 export { issueDocuments } from "./issue_documents.js";
 export { summarySlots } from "./summary_slots.js";

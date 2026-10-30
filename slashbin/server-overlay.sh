@@ -17,6 +17,8 @@ SERVER_FILES=(
   routes/cases.ts
   slashbin/protected-cases.ts
   slashbin/document-publications.ts
+  slashbin/publication-sync-drainer.ts
+  index.ts
   services/companies.ts
   routes/projects.ts
   services/heartbeat.ts

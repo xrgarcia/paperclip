@@ -35,7 +35,7 @@ trap 'rm -rf "$stage"' EXIT
 npm install --prefix "$stage" --no-audit --no-fund "paperclipai@$VERSION" >/dev/null
 
 mods="$stage/node_modules/@paperclipai"
-for target in "$mods/shared/dist" "$mods/db/dist/migrations/meta/_journal.json" "$mods/server/ui-dist" "$mods/server/dist/middleware/auth.js" "$mods/server/dist/routes/issues.js"; do
+for target in "$mods/shared/dist" "$mods/db/dist/migrations/meta/_journal.json" "$mods/server/ui-dist" "$mods/server/dist/middleware/auth.js" "$mods/server/dist/routes/issues.js" "$mods/server/dist/index.js"; do
   [ -e "$target" ] || { echo "published layout changed: $target missing" >&2; exit 1; }
 done
 
