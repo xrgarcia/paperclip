@@ -16,6 +16,7 @@ import {
   listCasesQuerySchema,
   listEventsQuerySchema,
 } from "./cases-schemas.js";
+import { createHash } from "node:crypto";
 import { Router, type Request, type Response } from "express";
 import multer from "multer";
 import { z } from "zod";
@@ -49,7 +50,7 @@ import { validate } from "../middleware/validate.js";
 import { instanceSettingsService } from "../services/instance-settings.js";
 import { documentAnnotationService, logActivity } from "../services/index.js";
 import type { StorageService } from "../storage/types.js";
-import { assertCompanyAccess, getActorInfo, hasCompanyAccess } from "./authz.js";
+import { assertAuthenticated, assertCompanyAccess, getActorInfo, hasCompanyAccess } from "./authz.js";
 import { logger } from "../middleware/logger.js";
 import {
   PROTECTED_CASES_ENV,
@@ -62,6 +63,7 @@ import {
   isProtectedCase,
   parseCaseProtection,
 } from "../slashbin/protected-cases.js";
+import { PublicationOwner } from "../slashbin/document-publications.js";
 
 type CaseRouteDb = Db | Parameters<Parameters<Db["transaction"]>[0]>[0];
 type CaseActor = ReturnType<typeof getActorInfo>;
@@ -1051,6 +1053,8 @@ export function caseRoutes(db: Db, storage: StorageService) {
           createdAt: now,
           updatedAt: now,
         });
+        // Slashbin (EM#642): the document is born a draft, in this same commit.
+        await PublicationOwner.createDraft(tx, { documentId: document!.id, companyId: caseRow.companyId, now });
       } else {
         await tx.update(caseDocuments).set({ updatedAt: now }).where(eq(caseDocuments.documentId, document!.id));
       }
@@ -1089,6 +1093,103 @@ export function caseRoutes(db: Db, storage: StorageService) {
     });
     res.json(result);
   });
+
+  // Slashbin (EM#642): the published set of a company. Outside /cases/:id/documents/:key
+  // because "published" is a legal document key. Read-only: company access only, no editor
+  // gate, and it answers while the protection config is invalid.
+  router.get("/companies/:companyId/published-documents", async (req, res) => {
+    const companyId = req.params.companyId as string;
+    assertAuthenticated(req);
+    if (!hasCompanyAccess(req, companyId)) throw notFound("Company not found");
+    assertCompanyAccess(req, companyId);
+    await assertCasesEnabled(db);
+    const rows = await PublicationOwner.listPublished(db, companyId);
+    res.json({
+      companyId,
+      generatedAt: new Date().toISOString(),
+      documents: rows.map((row) => ({
+        documentId: row.documentId,
+        caseId: row.caseId,
+        caseIdentifier: row.caseIdentifier,
+        key: row.key,
+        title: row.title,
+        format: "markdown" as const,
+        revisionId: row.revisionId,
+        revisionNumber: row.revisionNumber,
+        sha256: createHash("sha256").update(row.body, "utf8").digest("hex"),
+        publishedAt: row.publishedAt!.toISOString(),
+        body: row.body,
+      })),
+    });
+  });
+
+  // Slashbin (EM#642): publish and withdraw. Same gate as every protected-Case write, and
+  // nothing is publishable on an unprotected Case.
+  const publicationBodies = {
+    publish: z.object({
+      baseRevisionId: z.string().guid(),
+      changeSummary: z.string().trim().min(1).max(1_000),
+    }).strict(),
+    withdraw: z.object({ changeSummary: z.string().trim().min(1).max(1_000) }).strict(),
+  };
+  for (const action of ["publish", "withdraw"] as const) {
+    router.post(`/cases/:id/documents/:key/${action}`, async (req, res, next) => {
+      const caseRow = await resolveSharedPathCase(db, req, req.params.id as string);
+      if (!caseRow) return next();
+      const key = parseDocumentKey(req.params.key as string);
+      const actor = getActorInfo(req);
+      const parsed = publicationBodies[action].safeParse(req.body ?? {});
+      if (!parsed.success) throw badRequest(`Invalid ${action} body`, parsed.error.issues);
+      const body = parsed.data as { baseRevisionId?: string; changeSummary: string };
+      assertCaseProtectionAvailable(caseProtection);
+      assertCaseWritable(caseProtection, req, caseRow);
+      if (!isProtectedCase(caseProtection, caseRow)) {
+        throw forbidden("Only documents of a protected case can be published", { code: "case_not_protected", caseId: caseRow.id });
+      }
+      const publishedBy = req.actor.type === "agent" ? req.actor.keyId : actor.actorId;
+
+      const result = await db.transaction(async (tx) => {
+        await lockCaseDocumentKey(tx, { companyId: caseRow.companyId, caseId: caseRow.id, key });
+        const link = await loadCaseDocumentLink(tx, { companyId: caseRow.companyId, caseId: caseRow.id, key });
+        if (!link) throw notFound("Case document not found");
+        const moved = action === "publish"
+          ? await PublicationOwner.publish(tx, {
+            document: link.document,
+            baseRevisionId: body.baseRevisionId!,
+            publishedBy: publishedBy ?? actor.actorId,
+          })
+          : await PublicationOwner.withdraw(tx, { document: link.document });
+        return { link, moved };
+      });
+      await logActivity(db, {
+        companyId: caseRow.companyId,
+        actorType: actor.actorType,
+        actorId: actor.actorId,
+        agentId: actor.agentId,
+        runId: actor.runId,
+        action: `case.document_${action === "publish" ? "published" : "withdrawn"}`,
+        entityType: "case",
+        entityId: caseRow.id,
+        details: {
+          key,
+          documentId: result.moved.documentId,
+          revisionId: result.moved.revisionId,
+          revisionNumber: result.moved.revisionNumber,
+          changeSummary: body.changeSummary,
+        },
+      });
+      res.json({
+        documentId: result.moved.documentId,
+        caseId: caseRow.id,
+        key,
+        state: result.moved.state,
+        revisionId: result.moved.revisionId,
+        revisionNumber: result.moved.revisionNumber,
+        publishedAt: result.moved.publishedAt.toISOString(),
+        withdrawnAt: result.moved.withdrawnAt ? result.moved.withdrawnAt.toISOString() : null,
+      });
+    });
+  }
 
   router.post("/cases/:id/documents/:key/lock", async (req, res, next) => {
     const caseRow = await resolveSharedPathCase(db, req, req.params.id as string);
