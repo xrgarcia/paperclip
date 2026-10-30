@@ -539,6 +539,8 @@ export const queryKeys = {
     revisions: (id: string, key: string) =>
       ["cases", "revisions", id, key] as const,
     forIssue: (issueId: string) => ["cases", "for-issue", issueId] as const,
+    // Slashbin (EM#642): the company's published set.
+    published: (companyId: string) => ["cases", "published", companyId] as const,
   },
   externalObjects: {
     byIssue: (issueId: string) =>
