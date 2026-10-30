@@ -180,7 +180,10 @@ describeEmbeddedPostgres("document index sync drainer", () => {
     expect((await drainer.sweep()).called).toBe(false);
   });
 
-  it("leaves the ack behind when a publish lands during the call", async () => {
+  const res = (id: string, outcome: string, rev: string | null) =>
+    ({ documentId: id, caseIdentifier: "X-1", key: "k", outcome, indexedRevisionId: rev, chunks: rev ? 1 : 0, error: null });
+
+  it("records the index state reported when a publish moves during the call", async () => {
     const c = await company();
     const first = randomUUID();
     const second = randomUUID();
@@ -188,15 +191,77 @@ describeEmbeddedPostgres("document index sync drainer", () => {
     const { drainer, calls } = harness(c.id, [
       async () => {
         await db.update(documentPublications).set({ publishedRevisionId: second }).where(eq(documentPublications.documentId, id));
-        return ok(c.id, [{ documentId: id, caseIdentifier: "X-1", key: "k", outcome: "updated", indexedRevisionId: first, chunks: 1, error: null }]);
+        return ok(c.id, [res(id, "updated", first)]);
       },
-      ok(c.id, [{ documentId: id, caseIdentifier: "X-1", key: "k", outcome: "updated", indexedRevisionId: second, chunks: 1, error: null }]),
+      ok(c.id, [res(id, "updated", second)]),
     ]);
-    expect(await drainer.sweep()).toEqual({ called: true, acked: 0, failed: 0 });
-    expect(await ack(id)).toBeNull();
-    expect(await drainer.sweep()).toEqual({ called: true, acked: 1, failed: 0 });
-    expect(calls).toHaveLength(2);
+    await drainer.sweep();
+    expect(await ack(id)).toMatchObject({ acknowledgedRevisionId: first });
+    await drainer.sweep();
     expect(await ack(id)).toMatchObject({ acknowledgedRevisionId: second });
+    expect((await drainer.sweep()).called).toBe(false);
+    expect(calls).toHaveLength(2);
+  });
+
+  it("R1: indexed then withdrawn before the response lands is removed on the next sweep", async () => {
+    const c = await company();
+    const rev = randomUUID();
+    const id = await publication(c.id, "published", rev);
+    const { drainer, calls } = harness(c.id, [
+      async () => {
+        await db.update(documentPublications).set({ state: "withdrawn" }).where(eq(documentPublications.documentId, id));
+        return ok(c.id, [res(id, "updated", rev)]);
+      },
+      ok(c.id, [res(id, "withdrawn", null)]),
+    ]);
+    await drainer.sweep();
+    expect(await ack(id)).toMatchObject({ acknowledgedRevisionId: rev });
+    await drainer.sweep();
+    expect(calls).toHaveLength(2);
+    expect(calls[1]!.body.documentIds).toEqual([id]);
+    expect(await ack(id)).toMatchObject({ acknowledgedRevisionId: null });
+    expect((await drainer.sweep()).called).toBe(false);
+    expect(calls).toHaveLength(2);
+  });
+
+  it("R2: withdrawn then republished before the response lands is re-indexed on the next sweep", async () => {
+    const c = await company();
+    const rev = randomUUID();
+    const id = await publication(c.id, "withdrawn", rev);
+    await db.insert(documentIndexAcks).values({ documentId: id, environment: "dev", acknowledgedRevisionId: rev });
+    const { drainer, calls } = harness(c.id, [
+      async () => {
+        await db.update(documentPublications).set({ state: "published" }).where(eq(documentPublications.documentId, id));
+        return ok(c.id, [res(id, "withdrawn", null)]);
+      },
+      ok(c.id, [res(id, "updated", rev)]),
+    ]);
+    await drainer.sweep();
+    expect(await ack(id)).toMatchObject({ acknowledgedRevisionId: null });
+    await drainer.sweep();
+    expect(calls).toHaveLength(2);
+    expect(await ack(id)).toMatchObject({ acknowledgedRevisionId: rev });
+    expect((await drainer.sweep()).called).toBe(false);
+    expect(calls).toHaveLength(2);
+  });
+
+  it("a withdrawn id with no result on an ok or partial answer clears its ack; a published one fails", async () => {
+    const c = await company();
+    const rev = randomUUID();
+    const gone = await publication(c.id, "withdrawn", rev);
+    await db.insert(documentIndexAcks).values({ documentId: gone, environment: "dev", acknowledgedRevisionId: rev });
+    const live = await publication(c.id, "published", randomUUID());
+    const { drainer, calls } = harness(c.id, [
+      { body: { environment: "dev", companyId: c.id, status: "partial", results: [] } },
+      { body: { environment: "dev", companyId: c.id, status: "ok", results: [] } },
+    ]);
+    await drainer.sweep();
+    expect(await ack(gone)).toMatchObject({ acknowledgedRevisionId: null, attemptCount: 0 });
+    expect(await ack(live)).toMatchObject({ acknowledgedRevisionId: null, attemptCount: 1 });
+    await drainer.sweep();
+    expect(calls).toHaveLength(2);
+    expect(calls[1]!.body.documentIds).toEqual([live]);
+    expect(await ack(live)).toMatchObject({ attemptCount: 2 });
   });
 
   it("acks nothing when the response environment differs from the label", async () => {

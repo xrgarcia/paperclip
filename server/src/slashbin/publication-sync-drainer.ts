@@ -141,25 +141,18 @@ export function publicationSyncDrainer(db: Db, options: SyncDrainerOptions = {})
       });
   }
 
-  // Acks only while the publication still agrees with what the index reports, so an
-  // ack never names a revision the publication has moved past; otherwise it is left
-  // behind and the next sweep sees the document as pending again.
-  async function recordSuccess(target: DocumentSyncTarget, result: SyncResult): Promise<boolean> {
+  // The ack records the index state MCS reported (the indexed revision, or NULL once
+  // withdrawn), whatever the publication row says now. Sweeps are single-flight, so no
+  // older response can overwrite a newer one. If the publication moved during the call,
+  // the pending predicate (published and revision differs from the ack, or withdrawn
+  // and the ack names a revision) re-drives the document on the next sweep.
+  async function recordSuccess(
+    target: DocumentSyncTarget,
+    result: { documentId: string; outcome: SyncResult["outcome"]; indexedRevisionId: string | null },
+  ): Promise<boolean> {
     const at = now();
+    const acknowledgedRevisionId = result.outcome === "withdrawn" ? null : result.indexedRevisionId;
     return db.transaction(async (tx) => {
-      const publication = await tx
-        .select({ state: documentPublications.state, publishedRevisionId: documentPublications.publishedRevisionId })
-        .from(documentPublications)
-        .where(eq(documentPublications.documentId, result.documentId))
-        .for("share")
-        .limit(1)
-        .then((rows) => rows[0] ?? null);
-      if (!publication) return false;
-      const acknowledgedRevisionId = result.outcome === "withdrawn" ? null : result.indexedRevisionId;
-      const agrees = result.outcome === "withdrawn"
-        ? publication.state === "withdrawn"
-        : publication.state === "published" && publication.publishedRevisionId === acknowledgedRevisionId;
-      if (!agrees) return false;
       await tx
         .insert(documentIndexAcks)
         .values({
@@ -180,7 +173,7 @@ export function publicationSyncDrainer(db: Db, options: SyncDrainerOptions = {})
   }
 
   async function callSync(target: DocumentSyncTarget, documentIds: string[]): Promise<
-    { kind: "results"; results: SyncResult[] } | { kind: "error"; error: string }
+    { kind: "results"; results: SyncResult[]; complete: boolean } | { kind: "error"; error: string }
   > {
     try {
       const response = await doFetch(`${target.baseUrl.replace(/\/+$/, "")}/internal/document-sync`, {
@@ -218,7 +211,7 @@ export function publicationSyncDrainer(db: Db, options: SyncDrainerOptions = {})
           error: typeof raw.error === "string" ? raw.error : null,
         });
       }
-      return { kind: "results", results };
+      return { kind: "results", results, complete: body.status === "ok" || body.status === "partial" };
     } catch (err) {
       return { kind: "error", error: errorText(err) };
     }
@@ -242,10 +235,16 @@ export function publicationSyncDrainer(db: Db, options: SyncDrainerOptions = {})
         failed += ids.length;
         continue;
       }
+      const state = new Map(batch.map((p) => [p.documentId, p.state]));
       const byId = new Map(reply.results.map((r) => [r.documentId, r]));
       for (const id of ids) {
         const result = byId.get(id);
-        if (!result) {
+        if (!result && reply.complete && state.get(id) === "withdrawn") {
+          // The route answered ok/partial and lists no entry for a withdrawn id: it is
+          // already absent from the index (a lost earlier response), so the ack clears.
+          await recordSuccess(target, { documentId: id, outcome: "withdrawn", indexedRevisionId: null });
+          acked += 1;
+        } else if (!result) {
           await recordFailure(target, id, "document sync returned no result for this document");
           failed += 1;
         } else if (result.outcome === "failed") {
